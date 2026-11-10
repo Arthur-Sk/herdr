@@ -1137,7 +1137,7 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(9));
-    assert_eq!(claude.expected_version, 11);
+    assert_eq!(claude.expected_version, CLAUDE_INTEGRATION_VERSION);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     install_claude().unwrap();
@@ -1146,7 +1146,7 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
         hook_path,
         CLAUDE_INTEGRATION_VERSION,
     );
-    assert_eq!(status.installed_version, Some(11));
+    assert_eq!(status.installed_version, Some(CLAUDE_INTEGRATION_VERSION));
     assert_eq!(status.state, IntegrationStatusKind::Current);
 
     std::env::remove_var("HOME");
@@ -1176,7 +1176,7 @@ fn claude_v2_integration_status_is_outdated() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(2));
-    assert_eq!(claude.expected_version, 11);
+    assert_eq!(claude.expected_version, CLAUDE_INTEGRATION_VERSION);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -5326,4 +5326,263 @@ fn grok_dir_honors_grok_home_after_config_dir_seam() {
     std::env::remove_var(GROK_HOME_ENV_VAR);
     clear_integration_path_env();
     let _ = fs::remove_dir_all(base);
+}
+
+/// Runs the installed Claude hook under a stand-in `claude` process (a copy of
+/// `/bin/sh`, so its comm and argv[0] say claude) launched with `launch_args`,
+/// and returns the request the hook sent to a recording Herdr socket.
+#[cfg(target_os = "linux")]
+fn run_claude_session_hook(
+    config_dir: Option<&std::path::Path>,
+    launch_args: &[&str],
+    replies: &[&str],
+) -> Vec<Value> {
+    run_claude_session_hook_with(config_dir, launch_args, replies, true)
+}
+
+/// `export_claude_pid` mirrors Claude Code, which tells hooks its own pid in
+/// CLAUDE_PID; without it the hook finds Claude among its ancestors.
+#[cfg(target_os = "linux")]
+fn run_claude_session_hook_with(
+    config_dir: Option<&std::path::Path>,
+    launch_args: &[&str],
+    replies: &[&str],
+    export_claude_pid: bool,
+) -> Vec<Value> {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+    use std::process::Command;
+
+    let lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    std::env::set_var("HOME", &home);
+    let installed = install_claude().unwrap();
+    std::env::remove_var("HOME");
+
+    let bin = base.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // With CLAUDE_PID the stand-in is named like a Node launcher, so only the
+    // CLAUDE_PID lookup (not the ancestor walk) can find its arguments.
+    let claude_bin = bin.join(if export_claude_pid { "node" } else { "claude" });
+    fs::copy("/bin/sh", &claude_bin).unwrap();
+    let identity = bin.join("claude-cc");
+    fs::write(&identity, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&identity, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let input = base.join("hook-input.json");
+    fs::write(
+        &input,
+        r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"11111111-2222-3333-4444-555555555555","transcript_path":"/tmp/t.jsonl"}"#,
+    )
+    .unwrap();
+
+    let socket_path = std::path::PathBuf::from(format!(
+        "/tmp/herdr-claude-hook-{}-{}.sock",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+    ));
+    let _ = fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let replies = replies.iter().map(|r| r.to_string()).collect::<Vec<_>>();
+    listener.set_nonblocking(true).unwrap();
+    let recorder = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut requests = Vec::new();
+        for reply in replies {
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break Some(stream),
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(_) => break None,
+                }
+            };
+            let Some(stream) = stream else {
+                break;
+            };
+            // No panics past this point: the caller holds the integration env
+            // lock, and a panic would poison it for every other test.
+            let _ = stream.set_nonblocking(false);
+            let Ok(read_half) = stream.try_clone() else {
+                break;
+            };
+            let mut line = String::new();
+            if BufReader::new(read_half).read_line(&mut line).is_err() {
+                break;
+            }
+            let Ok(request) = serde_json::from_str::<Value>(&line) else {
+                break;
+            };
+            let response = format!(
+                "{}\n",
+                reply.replace("ID", request["id"].as_str().unwrap_or_default())
+            );
+            // MSG_NOSIGNAL: CLI tests may switch SIGPIPE to its default action
+            // process-wide, and the hook may already have hung up.
+            // SAFETY: the buffer outlives the call and the fd is a live socket.
+            unsafe {
+                libc::send(
+                    std::os::fd::AsRawFd::as_raw_fd(&stream),
+                    response.as_ptr().cast(),
+                    response.len(),
+                    libc::MSG_NOSIGNAL,
+                );
+            }
+            requests.push(request);
+        }
+        requests
+    });
+
+    let script = format!(
+        "{}sh '{}' session < '{}'; exit $?",
+        if export_claude_pid {
+            "CLAUDE_PID=$$ "
+        } else {
+            ""
+        },
+        installed.hook_path.display(),
+        input.display()
+    );
+    let mut command = Command::new(&claude_bin);
+    command
+        .arg("-c")
+        .arg(script)
+        .args(launch_args)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w1:p2")
+        .env("HERDR_SOCKET_PATH", &socket_path)
+        .env("HOME", "/home/someone")
+        .env_remove("CLAUDE_PID")
+        .env_remove("CLAUDE_CONFIG_DIR");
+    if let Some(config_dir) = config_dir {
+        command.env("CLAUDE_CONFIG_DIR", config_dir);
+    }
+    let status = command.status();
+    let requests = recorder.join();
+    let _ = fs::remove_file(&socket_path);
+    let _ = fs::remove_dir_all(base);
+    drop(lock);
+    assert!(status.unwrap().success());
+    requests.unwrap()
+}
+
+#[cfg(target_os = "linux")]
+const OK_REPLY: &str = r#"{"id":"ID","result":{"type":"ok"}}"#;
+
+#[cfg(target_os = "linux")]
+fn reported_resume_argv(request: &Value) -> Option<Vec<String>> {
+    assert_eq!(request["method"], "pane.report_agent_session");
+    assert_eq!(request["params"]["source"], "herdr:claude");
+    request["params"].get("resume_argv").map(|argv| {
+        argv.as_array()
+            .unwrap()
+            .iter()
+            .map(|arg| arg.as_str().unwrap().to_string())
+            .collect()
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn claude_hook_reports_resume_command_for_the_launching_identity() {
+    let launch = [
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        "/tmp/work",
+        "/tmp/more",
+        "--model",
+        "opus",
+        "--effort=max",
+        "--resume",
+        "00000000-0000-0000-0000-000000000000",
+        "fix the bug",
+    ];
+    let expected_tail = [
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        "/tmp/work",
+        "/tmp/more",
+        "--resume",
+        "11111111-2222-3333-4444-555555555555",
+    ];
+
+    let home_identity = std::path::PathBuf::from("/home/someone/.claude-cc");
+    let requests = run_claude_session_hook(Some(&home_identity), &launch, &[OK_REPLY]);
+    let argv = reported_resume_argv(&requests[0]).expect("resume argv");
+    assert_eq!(argv[0], "claude-cc");
+    assert_eq!(argv[1..], expected_tail);
+
+    let requests = run_claude_session_hook(None, &launch, &[OK_REPLY]);
+    let argv = reported_resume_argv(&requests[0]).expect("resume argv");
+    assert_eq!(argv[0], "claude");
+    assert_eq!(argv[1..], expected_tail);
+
+    let default_dir = std::path::PathBuf::from("/home/someone/.claude");
+    let requests = run_claude_session_hook(Some(&default_dir), &launch, &[OK_REPLY]);
+    assert_eq!(
+        reported_resume_argv(&requests[0]).expect("argv")[0],
+        "claude"
+    );
+
+    let odd_dir = std::path::PathBuf::from("/srv/agents/conf");
+    let requests = run_claude_session_hook(Some(&odd_dir), &launch, &[OK_REPLY]);
+    let argv = reported_resume_argv(&requests[0]).expect("resume argv");
+    assert_eq!(
+        argv[..3],
+        ["env", "CLAUDE_CONFIG_DIR=/srv/agents/conf", "claude"]
+    );
+    assert_eq!(argv[3..], expected_tail);
+    crate::agent_resume::validate_resume_argv(&argv).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn claude_hook_finds_claude_among_its_ancestors_without_claude_pid() {
+    let requests = run_claude_session_hook_with(
+        None,
+        &["--dangerously-skip-permissions", "a prompt"],
+        &[OK_REPLY],
+        false,
+    );
+    assert_eq!(
+        reported_resume_argv(&requests[0]).expect("argv"),
+        [
+            "claude",
+            "--dangerously-skip-permissions",
+            "--resume",
+            "11111111-2222-3333-4444-555555555555"
+        ]
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn claude_hook_skips_resume_command_for_print_mode() {
+    let requests = run_claude_session_hook(None, &["-p", "summarize"], &[OK_REPLY]);
+    assert_eq!(reported_resume_argv(&requests[0]), None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn claude_hook_retries_until_herdr_holds_the_pane_for_claude() {
+    let rejected = r#"{"id":"ID","error":{"code":"resume_not_accepted","message":"not yet"}}"#;
+    let requests = run_claude_session_hook(None, &[], &[rejected, rejected, OK_REPLY]);
+    assert_eq!(requests.len(), 3);
+    let seqs = requests
+        .iter()
+        .map(|request| request["params"]["seq"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        reported_resume_argv(&requests[2]).expect("argv"),
+        ["claude", "--resume", "11111111-2222-3333-4444-555555555555"]
+    );
 }
