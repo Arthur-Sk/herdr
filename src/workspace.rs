@@ -448,6 +448,34 @@ impl Workspace {
         )
     }
 
+    /// The tab's name as shown to people: its manual name, else the session
+    /// title an agent reports in its terminal title (the focused pane first),
+    /// else its number. Plain shells are ignored because they title themselves
+    /// with prompt details, not a name.
+    pub(crate) fn tab_display_name_from_terminals(
+        &self,
+        tab_idx: usize,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> Option<String> {
+        let tab = self.tabs.get(tab_idx)?;
+        if tab.custom_name.is_some() {
+            return self.tab_display_name(tab_idx);
+        }
+        let focused = tab.layout.focused();
+        std::iter::once(focused)
+            .chain(
+                tab.layout
+                    .pane_ids()
+                    .into_iter()
+                    .filter(|id| *id != focused),
+            )
+            .filter_map(|pane_id| terminals.get(tab.terminal_id(pane_id)?))
+            .filter(|terminal| terminal.effective_agent_label().is_some())
+            .find_map(|terminal| terminal.terminal_title_stripped())
+            .map(|title| shorten_tab_title(&title))
+            .or_else(|| self.tab_display_name(tab_idx))
+    }
+
     pub fn switch_tab(&mut self, idx: usize) {
         if idx < self.tabs.len() {
             self.active_tab = idx;
@@ -1422,6 +1450,22 @@ impl Workspace {
             max_pane_number
         );
     }
+}
+
+const MAX_AUTO_TAB_TITLE_GRAPHEMES: usize = 30;
+
+fn shorten_tab_title(title: &str) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    let graphemes = title.graphemes(true).collect::<Vec<_>>();
+    if graphemes.len() <= MAX_AUTO_TAB_TITLE_GRAPHEMES {
+        return title.to_string();
+    }
+    let mut short = graphemes[..MAX_AUTO_TAB_TITLE_GRAPHEMES - 1]
+        .concat()
+        .trim_end()
+        .to_string();
+    short.push('…');
+    short
 }
 
 #[cfg(test)]

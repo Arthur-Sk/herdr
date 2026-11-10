@@ -7,6 +7,7 @@ use crate::layout::PaneId;
 pub(crate) struct TerminalTitleChanges {
     pub(crate) raw_changed: bool,
     pub(crate) stripped_changed: bool,
+    pub(crate) tab_label_changed: bool,
 }
 
 impl App {
@@ -23,10 +24,16 @@ impl App {
             })
     }
 
+    /// Title changes that alter what the shared UI draws: a configured sidebar
+    /// title token, or an automatically named tab that shows an agent's title.
+    pub(crate) fn terminal_title_needs_full_render(&self, changes: &TerminalTitleChanges) -> bool {
+        changes.tab_label_changed || self.terminal_title_sidebar_changed(changes)
+    }
+
     pub(crate) fn sync_pending_terminal_titles(&mut self) -> TerminalTitleChanges {
         let sources = self.render_dirty.pending_terminal_title_sources();
         let changes = self.sync_terminal_titles(&sources);
-        if self.terminal_title_sidebar_changed(&changes) {
+        if self.terminal_title_needs_full_render(&changes) {
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
         }
@@ -65,6 +72,12 @@ impl App {
             changes.raw_changed |= change.raw_changed;
             changes.stripped_changed |= change.stripped_changed;
             if change.stripped_changed {
+                changes.tab_label_changed |= terminal.effective_agent_label().is_some()
+                    && self.state.workspaces.get(ws_idx).is_some_and(|ws| {
+                        ws.find_tab_index_for_pane(pane_id)
+                            .and_then(|tab_idx| ws.tabs.get(tab_idx))
+                            .is_some_and(|tab| tab.is_auto_named())
+                    });
                 publish.push((ws_idx, pane_id));
             }
         }
@@ -115,6 +128,7 @@ mod tests {
             TerminalTitleChanges {
                 raw_changed: true,
                 stripped_changed: true,
+                tab_label_changed: true,
             }
         );
         let pane = app.pane_info(0, pane_id).unwrap();
@@ -136,6 +150,7 @@ mod tests {
             TerminalTitleChanges {
                 raw_changed: true,
                 stripped_changed: false,
+                tab_label_changed: false,
             }
         );
         let pane = app.pane_info(0, pane_id).unwrap();
@@ -195,6 +210,50 @@ mod tests {
         assert!(changes.stripped_changed);
         let render_request = app.render_dirty.take();
         assert!(render_request.generic);
+    }
+
+    #[tokio::test]
+    async fn agent_title_changes_redraw_automatically_named_tabs_only() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.state.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .unwrap()
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        runtime.test_process_pty_bytes("\x1b]0;✳ first session\x07".as_bytes());
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        app.render_dirty.request_terminal_title(pane_id);
+
+        assert!(app.sync_pending_terminal_titles().tab_label_changed);
+        assert!(app.render_dirty.take().generic);
+
+        app.state.workspaces[0].tabs[0].custom_name = Some("manual".into());
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_process_pty_bytes("\x1b]0;✳ second session\x07".as_bytes());
+        app.render_dirty.request_terminal_title(pane_id);
+
+        assert!(!app.sync_pending_terminal_titles().tab_label_changed);
+        assert!(!app.render_dirty.take().generic);
     }
 
     #[test]

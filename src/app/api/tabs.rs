@@ -155,18 +155,24 @@ impl App {
         else {
             return tab_not_found(id, &params.tab_id);
         };
-        tab.set_custom_name(params.label.clone());
+        // An empty label drops the manual name, so the tab goes back to its
+        // automatic one (an agent's session title or the tab number).
+        if params.label.trim().is_empty() {
+            tab.custom_name = None;
+        } else {
+            tab.set_custom_name(params.label.clone());
+        }
         crate::logging::tab_renamed(&workspace_id, &tab_id);
         self.schedule_session_save();
+        let tab = self.tab_info(ws_idx, tab_idx).unwrap();
         self.emit_event(EventEnvelope {
             event: EventKind::TabRenamed,
             data: EventData::TabRenamed {
                 tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
                 workspace_id: self.public_workspace_id(ws_idx),
-                label: params.label,
+                label: tab.label.clone(),
             },
         });
-        let tab = self.tab_info(ws_idx, tab_idx).unwrap();
 
         encode_success(id, ResponseResult::TabInfo { tab })
     }
@@ -327,6 +333,38 @@ mod tests {
         config::{Config, ShellModeConfig},
         workspace::Workspace,
     };
+
+    #[test]
+    fn api_tab_rename_to_empty_label_restores_automatic_name() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        app.state.workspaces = vec![Workspace::test_new("tabs")];
+        app.state.active = Some(0);
+        app.state.workspaces[0].tabs[0].custom_name = Some("manual".into());
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+
+        let response = app.handle_tab_rename(
+            "req".into(),
+            TabRenameParams {
+                tab_id,
+                label: "  ".into(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::TabInfo { tab } = success.result else {
+            panic!("expected tab info");
+        };
+        assert!(app.state.workspaces[0].tabs[0].custom_name.is_none());
+        assert_eq!(tab.label, "1");
+    }
 
     #[test]
     fn api_tab_close_last_tab_closes_workspace_and_emits_both_events() {

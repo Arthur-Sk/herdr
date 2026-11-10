@@ -95,7 +95,7 @@ impl App {
                         self.state
                             .workspaces
                             .get(workspace_index)?
-                            .tab_display_name(tab_index)
+                            .tab_display_name_from_terminals(tab_index, &self.state.terminals)
                     }) {
                         title.push_str(&name);
                     }
@@ -172,6 +172,88 @@ mod tests {
         terminal.set_terminal_title(Some("⠋ building".into()));
 
         assert_eq!(app.window_title().as_deref(), Some("api|building"));
+    }
+
+    fn set_agent_title(app: &mut App, pane_id: crate::layout::PaneId, title: &str) {
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("agent terminal");
+        terminal
+            .set_detected_agent_process_at(crate::detect::Agent::Claude, std::time::Instant::now());
+        terminal.set_terminal_title(Some(title.into()));
+    }
+
+    #[test]
+    fn auto_named_tab_shows_agent_session_title_until_renamed() {
+        let mut app = test_app();
+        app.configure_window_title("{tab}");
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        set_agent_title(&mut app, pane_id, "✳ Доработки форка herdr");
+        assert_eq!(app.window_title().as_deref(), Some("Доработки форка herdr"));
+        assert_eq!(
+            app.tab_info(0, 0).expect("tab").label,
+            "Доработки форка herdr"
+        );
+
+        app.state.workspaces[0].tabs[0].custom_name = Some("build".into());
+        assert_eq!(app.window_title().as_deref(), Some("build"));
+        assert_eq!(app.tab_info(0, 0).expect("tab").label, "build");
+    }
+
+    #[test]
+    fn shell_title_without_agent_keeps_numbered_tab() {
+        let mut app = test_app();
+        app.configure_window_title("{tab}");
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("shell terminal")
+            .set_terminal_title(Some("arthur@host: ~".into()));
+
+        assert_eq!(app.window_title().as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn focused_agent_pane_names_tab_and_other_agent_panes_are_fallback() {
+        let mut app = test_app();
+        app.configure_window_title("{tab}");
+        let first = app.state.workspaces[0].tabs[0].root_pane;
+        let second = app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].tabs[0].layout.focus_pane(second);
+
+        set_agent_title(&mut app, first, "✳ first session");
+        assert_eq!(app.window_title().as_deref(), Some("first session"));
+
+        set_agent_title(&mut app, second, "⠂ second session");
+        assert_eq!(app.window_title().as_deref(), Some("second session"));
+    }
+
+    #[test]
+    fn long_agent_session_titles_are_shortened() {
+        let mut app = test_app();
+        app.configure_window_title("{tab}");
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        set_agent_title(
+            &mut app,
+            pane_id,
+            "✳ Очень длинное название сессии агента claude",
+        );
+        assert_eq!(
+            app.window_title().as_deref(),
+            Some("Очень длинное название сессии…")
+        );
     }
 
     #[test]

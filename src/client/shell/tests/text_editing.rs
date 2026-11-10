@@ -452,3 +452,25 @@ fn legacy_terminal_ctrl_word_keys_edit_whole_words_in_every_field() {
         );
     }
 }
+
+#[test]
+fn emptying_a_custom_tab_name_asks_to_restore_the_automatic_name() {
+    use crate::api::schema::Method;
+    let mut state = shell(3);
+    if let Some(ClientShellOverlay::Rename(rename)) = state.overlay.as_mut() {
+        rename.target = ClientRenameTarget::Tab {
+            tab_id: "w1:t1".into(),
+            auto_name: false,
+            original_name: "manual".into(),
+        };
+    }
+    *editor(&mut state) = TextEditor::from("  ");
+    let result = press(&mut state, KeyCode::Enter, KeyModifiers::NONE);
+    let [ClientShellAction::Endpoint { request, .. }] = &result.actions[..] else {
+        panic!("expected a rename request");
+    };
+    let Method::TabRename(params) = &request.method else {
+        panic!("expected tab rename");
+    };
+    assert_eq!(params.label, "");
+}

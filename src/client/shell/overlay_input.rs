@@ -981,12 +981,17 @@ impl ClientShellState {
                 tab_id,
                 auto_name,
                 original_name,
-            } => (!(trimmed.is_empty() || auto_name && trimmed == original_name)).then(|| {
-                crate::api::schema::Method::TabRename(crate::api::schema::TabRenameParams {
-                    tab_id,
-                    label: trimmed.to_owned(),
+            } => {
+                // An emptied manual name is sent too: the server then drops it
+                // and the tab returns to its automatic name.
+                let changed = !trimmed.is_empty() && trimmed != original_name;
+                (!auto_name || changed).then(|| {
+                    crate::api::schema::Method::TabRename(crate::api::schema::TabRenameParams {
+                        tab_id,
+                        label: trimmed.to_owned(),
+                    })
                 })
-            }),
+            }
             ClientRenameTarget::Pane { pane_id } => Some(crate::api::schema::Method::PaneRename(
                 crate::api::schema::PaneRenameParams {
                     pane_id,

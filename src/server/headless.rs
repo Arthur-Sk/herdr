@@ -1440,7 +1440,7 @@ impl HeadlessServer {
             self.sync_window_title();
         }
         (
-            self.app.terminal_title_sidebar_changed(&changes),
+            self.app.terminal_title_needs_full_render(&changes),
             outer_title_synced,
         )
     }
