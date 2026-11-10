@@ -192,6 +192,8 @@ impl TextEditor {
                 KeyCode::Char('e') if ctrl => Some(self.text.len()),
                 KeyCode::Char('b') if alt => Some(self.word_boundary(true)),
                 KeyCode::Char('f') if alt => Some(self.word_boundary(false)),
+                KeyCode::Left if ctrl => Some(self.word_boundary(true)),
+                KeyCode::Right if ctrl => Some(self.word_boundary(false)),
                 _ => None,
             };
             if let Some(position) = movement {
@@ -199,10 +201,7 @@ impl TextEditor {
                 self.replace_on_type = false;
             } else {
                 match code {
-                    KeyCode::Backspace | KeyCode::Char('h')
-                        if code == KeyCode::Backspace && plain
-                            || code == KeyCode::Char('h') && ctrl =>
-                    {
+                    KeyCode::Backspace if plain => {
                         if self.replace_on_type {
                             self.clear();
                         } else {
@@ -216,8 +215,16 @@ impl TextEditor {
                     KeyCode::Char('w') if ctrl => {
                         self.remove(self.word_boundary(true), self.cursor, true)
                     }
-                    KeyCode::Backspace if ctrl || alt => {
+                    // Legacy terminals such as GNOME Terminal send Ctrl+Backspace as
+                    // ^H, indistinguishable from Ctrl+H, so ^H deletes a word too.
+                    KeyCode::Backspace | KeyCode::Char('h')
+                        if code == KeyCode::Backspace && (ctrl || alt)
+                            || code == KeyCode::Char('h') && ctrl =>
+                    {
                         self.remove(self.word_boundary(true), self.cursor, true)
+                    }
+                    KeyCode::Delete if ctrl => {
+                        self.remove(self.cursor, self.word_boundary(false), true)
                     }
                     KeyCode::Char('d') if alt => {
                         self.remove(self.cursor, self.word_boundary(false), true)
@@ -321,8 +328,11 @@ mod tests {
             (End, plain, "one two", 7, ""),
             (Char('e'), ctrl, "one two", 7, ""),
             (Backspace, plain, "onetwo", 3, ""),
-            (Char('h'), ctrl, "onetwo", 3, ""),
+            (Char('h'), ctrl, "two", 0, "one "),
             (Delete, plain, "one wo", 4, ""),
+            (Delete, ctrl, "one ", 4, "two"),
+            (Left, ctrl, "one two", 0, ""),
+            (Right, ctrl, "one two", 7, ""),
             (Char('d'), ctrl, "one wo", 4, ""),
             (Char('b'), alt, "one two", 0, ""),
             (Char('f'), alt, "one two", 7, ""),

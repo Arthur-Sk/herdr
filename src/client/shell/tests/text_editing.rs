@@ -412,3 +412,43 @@ fn plain_and_ime_text_fill_every_field_on_a_report_all_host() {
         );
     }
 }
+
+/// GNOME Terminal (VTE) has no kitty keyboard protocol: Ctrl+Backspace arrives
+/// as a bare ^H, Ctrl+Delete as CSI 3;5~, Ctrl+Left/Right as CSI 1;5D/C.
+#[test]
+fn legacy_terminal_ctrl_word_keys_edit_whole_words_in_every_field() {
+    for field in 0..10 {
+        let mut state = shell(field);
+        *editor(&mut state) = TextEditor::from("one two three");
+        state.handle_input_bytes(b"\x1b[1;5D\x1b[1;5D_");
+        assert_eq!(
+            editor(&mut state).as_str(),
+            "one _two three",
+            "ctrl+left, field {field}"
+        );
+        state.handle_input_bytes(b"\x1b[1;5C=");
+        assert_eq!(
+            editor(&mut state).as_str(),
+            "one _two= three",
+            "ctrl+right, field {field}"
+        );
+        state.handle_input_bytes(b"\x08");
+        assert_eq!(
+            editor(&mut state).as_str(),
+            "one _two three",
+            "ctrl+backspace, field {field}"
+        );
+        state.handle_input_bytes(b"\x08");
+        assert_eq!(
+            editor(&mut state).as_str(),
+            "one  three",
+            "ctrl+backspace word, field {field}"
+        );
+        state.handle_input_bytes(b"\x1b[3;5~");
+        assert_eq!(
+            editor(&mut state).as_str(),
+            "one ",
+            "ctrl+delete, field {field}"
+        );
+    }
+}
