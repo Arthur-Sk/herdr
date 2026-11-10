@@ -4799,6 +4799,63 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_word_deletion_chords_reach_shells_and_kitty_apps() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let (tx, _rx) = mpsc::channel(4);
+        let legacy = GhosttyPaneTerminal::new(
+            crate::ghostty::Terminal::new(80, 24, 0).unwrap(),
+            tx.clone(),
+        )
+        .unwrap();
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[>1u");
+        let kitty = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let key = |code, modifiers| crate::input::TerminalKey::new(code, modifiers);
+
+        // A shell reads Ctrl+Backspace as ^H and Ctrl+Delete as CSI 3;5~, the
+        // bytes GNOME Terminal sends, so ~/.inputrc bindings work in and out of
+        // Herdr. Claude panes get the Alt chords instead.
+        for (code, modifiers, shell, kitty_app) in [
+            (
+                KeyCode::Backspace,
+                KeyModifiers::CONTROL,
+                b"\x08".as_slice(),
+                b"\x1b[127;5u".as_slice(),
+            ),
+            (
+                KeyCode::Delete,
+                KeyModifiers::CONTROL,
+                b"\x1b[3;5~",
+                b"\x1b[3;5~",
+            ),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::ALT,
+                b"\x1b\x7f",
+                b"\x1b[127;3u",
+            ),
+            (
+                KeyCode::Char('d'),
+                KeyModifiers::ALT,
+                b"\x1bd",
+                b"\x1b[100;3u",
+            ),
+        ] {
+            assert_eq!(
+                legacy.encode_terminal_key(key(code, modifiers)),
+                shell,
+                "legacy {code:?} {modifiers:?}"
+            );
+            assert_eq!(
+                kitty.encode_terminal_key(key(code, modifiers)),
+                kitty_app,
+                "kitty {code:?} {modifiers:?}"
+            );
+        }
+    }
+
+    #[test]
     fn ghostty_ctrl_tab_matches_the_pane_keyboard_protocol() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();

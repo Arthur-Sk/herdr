@@ -2378,6 +2378,17 @@ impl HeadlessServer {
                 else {
                     return false;
                 };
+                let pane_agent = self
+                    .app
+                    .state
+                    .workspaces
+                    .get(workspace_index)
+                    .and_then(|workspace| workspace.terminal_id(runtime_pane_id))
+                    .and_then(|terminal_id| self.app.state.terminals.get(terminal_id))
+                    .and_then(|terminal| terminal.effective_agent_label());
+                if pane_agent == Some("claude") {
+                    super::pane_input::claude_word_deletion_keys(&mut events);
+                }
                 let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
                     &self.app.terminal_runtimes,
                     workspace_index,

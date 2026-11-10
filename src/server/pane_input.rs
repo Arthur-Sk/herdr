@@ -1,7 +1,9 @@
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
-use crate::protocol::{AttachScrollDirection, AttachScrollSource, ClientPaneInputEvent};
+use crate::protocol::{
+    AttachScrollDirection, AttachScrollSource, ClientKeyCode, ClientPaneInputEvent,
+};
 
 pub(super) fn downgrade_ineligible_pixel_mouse(
     events: &mut [ClientPaneInputEvent],
@@ -226,6 +228,42 @@ pub(super) fn apply_client_popup_input_events(
     Ok(keyboard_forwarded)
 }
 
+/// Claude Code deletes words with Alt+Backspace and Alt+D. It honours
+/// Ctrl+Backspace only when the chord arrives as a Kitty report, and it binds
+/// Ctrl+Delete to deleting one character, so a Claude pane gets the Alt chords
+/// for both. Shells and other apps keep the keys as typed.
+pub(super) fn claude_word_deletion_keys(events: &mut [ClientPaneInputEvent]) {
+    let ctrl = KeyModifiers::CONTROL.bits();
+    let alt = KeyModifiers::ALT.bits();
+    for event in events {
+        let ClientPaneInputEvent::Key {
+            code,
+            modifiers,
+            shifted_codepoint,
+            generated_text,
+            physical_key_id,
+            windows_record,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        if *modifiers != ctrl {
+            continue;
+        }
+        match code {
+            ClientKeyCode::Backspace => {}
+            ClientKeyCode::Delete => *code = ClientKeyCode::Char('d'),
+            _ => continue,
+        }
+        *modifiers = alt;
+        *shifted_codepoint = None;
+        *generated_text = None;
+        *physical_key_id = None;
+        *windows_record = None;
+    }
+}
+
 pub(super) fn apply_client_terminal_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
@@ -363,6 +401,56 @@ pub(super) fn apply_client_terminal_input_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_panes_get_alt_chords_for_ctrl_word_deletion() {
+        use crate::protocol::ClientKeyKind;
+
+        let key = |code: ClientKeyCode, modifiers: KeyModifiers, kind: ClientKeyKind| {
+            ClientPaneInputEvent::Key {
+                code,
+                modifiers: modifiers.bits(),
+                kind,
+                repeat_count: 1,
+                shifted_codepoint: None,
+                generated_text: None,
+                tracks_release: true,
+                physical_key_id: Some(1),
+                windows_record: None,
+            }
+        };
+        let ctrl = KeyModifiers::CONTROL;
+        let alt = KeyModifiers::ALT;
+        let press = ClientKeyKind::Press;
+        let release = ClientKeyKind::Release;
+        let mut events = vec![
+            key(ClientKeyCode::Backspace, ctrl, press),
+            key(ClientKeyCode::Backspace, ctrl, release),
+            key(ClientKeyCode::Delete, ctrl, press),
+            key(ClientKeyCode::Delete, ctrl, release),
+            key(ClientKeyCode::Delete, KeyModifiers::empty(), press),
+            key(ClientKeyCode::Delete, ctrl | KeyModifiers::SHIFT, press),
+            key(ClientKeyCode::Char('h'), ctrl, press),
+            ClientPaneInputEvent::Paste("text".into()),
+        ];
+        let mut expected = events.clone();
+        expected[0] = key(ClientKeyCode::Backspace, alt, press);
+        expected[1] = key(ClientKeyCode::Backspace, alt, release);
+        expected[2] = key(ClientKeyCode::Char('d'), alt, press);
+        expected[3] = key(ClientKeyCode::Char('d'), alt, release);
+        for event in &mut expected[..4] {
+            if let ClientPaneInputEvent::Key {
+                physical_key_id, ..
+            } = event
+            {
+                *physical_key_id = None;
+            }
+        }
+
+        claude_word_deletion_keys(&mut events);
+
+        assert_eq!(events, expected);
+    }
 
     #[tokio::test]
     async fn terminal_attach_stale_geometry_falls_back_to_the_canonical_cell() {

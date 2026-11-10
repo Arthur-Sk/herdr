@@ -357,39 +357,56 @@ fn text_press_release_survives_shift_released_first_and_never_becomes_a_repeat()
 
 #[test]
 fn raw_backspace_follows_the_host_tty_erase_character() {
-    use crate::protocol::{ClientKeyCode, ClientKeyKind};
+    use crate::protocol::ClientKeyCode;
 
+    let none = KeyModifiers::empty();
+    let ctrl = KeyModifiers::CONTROL;
+    let alt = KeyModifiers::ALT;
     // #3244: MobaXterm sends 0x08 for Backspace and its tty says erase is ^H.
-    for (erase, plain, alt) in [
+    // Where erase is DEL, 0x08 is VTE's and xterm's Ctrl+Backspace.
+    for (erase, plain, with_alt) in [
         (
             Some(0x08),
-            ClientKeyCode::Backspace,
-            ClientKeyCode::Backspace,
+            (ClientKeyCode::Backspace, none),
+            (ClientKeyCode::Backspace, alt),
         ),
         (
             Some(0x7f),
-            ClientKeyCode::Char('h'),
-            ClientKeyCode::Char('h'),
+            (ClientKeyCode::Backspace, ctrl),
+            (ClientKeyCode::Backspace, ctrl | alt),
         ),
-        (None, ClientKeyCode::Char('h'), ClientKeyCode::Char('h')),
+        (
+            None,
+            (ClientKeyCode::Char('h'), ctrl),
+            (ClientKeyCode::Char('h'), ctrl | alt),
+        ),
     ] {
         let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
         state.set_host_erase_byte(erase);
         state.set_snapshot(Box::new(snapshot()));
         state.set_pane_surface(surface());
 
+        let keys = |outcome: &ClientShellInput| {
+            outcome
+                .requests
+                .iter()
+                .filter_map(|request| match request {
+                    ClientMessage::ClientShellPaneInput { events, .. } => Some(events),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|event| match event {
+                    ClientPaneInputEvent::Key {
+                        code, modifiers, ..
+                    } => Some((code.clone(), KeyModifiers::from_bits_truncate(*modifiers))),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
         let press = state.handle_input_bytes(b"\x08");
-        assert_eq!(
-            pane_key_events(&press),
-            [(plain.clone(), ClientKeyKind::Press)],
-            "erase {erase:?}"
-        );
+        assert_eq!(keys(&press), [plain], "erase {erase:?}");
         let alt_press = state.handle_input_bytes(b"\x1b\x08");
-        assert_eq!(
-            pane_key_events(&alt_press),
-            [(alt, ClientKeyKind::Press)],
-            "alt, erase {erase:?}"
-        );
+        assert_eq!(keys(&alt_press), [with_alt], "alt, erase {erase:?}");
     }
 }
 

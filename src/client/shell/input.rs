@@ -131,22 +131,26 @@ impl ClientShellState {
     }
 
     pub(crate) fn set_host_erase_byte(&mut self, erase: Option<u8>) {
-        self.host_erase_is_ctrl_h = erase == Some(0x08);
+        self.host_erase_byte = erase;
     }
 
     /// A raw 0x08 (or ESC 0x08) from a host whose erase character is `^H` is
-    /// its Backspace key (#3244).
+    /// its Backspace key (#3244). Where erase is DEL, Backspace sends 0x7f and
+    /// 0x08 is what VTE (GNOME Terminal) and xterm send for Ctrl+Backspace.
+    /// Ctrl+H sends the same byte, so it is read as Ctrl+Backspace there too.
     fn host_erase_key(&self, key: crate::input::TerminalKey) -> crate::input::TerminalKey {
-        if !self.host_erase_is_ctrl_h {
-            return key;
-        }
+        let chord = match self.host_erase_byte {
+            Some(0x08) => KeyModifiers::empty(),
+            Some(0x7f) => KeyModifiers::CONTROL,
+            _ => return key,
+        };
         let alt = match key.vt_bytes() {
             Some([0x08]) => KeyModifiers::empty(),
             Some([0x1b, 0x08]) => KeyModifiers::ALT,
             _ => return key,
         };
         let bytes = key.vt_bytes().map(<[u8]>::to_vec).unwrap_or_default();
-        crate::input::TerminalKey::new(KeyCode::Backspace, alt)
+        crate::input::TerminalKey::new(KeyCode::Backspace, chord | alt)
             .with_kind(key.kind)
             .with_vt_bytes(bytes)
     }

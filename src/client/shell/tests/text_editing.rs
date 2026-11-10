@@ -414,41 +414,43 @@ fn plain_and_ime_text_fill_every_field_on_a_report_all_host() {
 }
 
 /// GNOME Terminal (VTE) has no kitty keyboard protocol: Ctrl+Backspace arrives
-/// as a bare ^H, Ctrl+Delete as CSI 3;5~, Ctrl+Left/Right as CSI 1;5D/C.
+/// as a bare ^H, Ctrl+Delete as CSI 3;5~, Ctrl+Left/Right as CSI 1;5D/C. Its tty
+/// erase is DEL; with no erase known, ^H is Ctrl+H, which deletes a word too.
 #[test]
 fn legacy_terminal_ctrl_word_keys_edit_whole_words_in_every_field() {
-    for field in 0..10 {
+    for (field, erase) in (0..10).flat_map(|field| [(field, Some(0x7f)), (field, None)]) {
         let mut state = shell(field);
+        state.set_host_erase_byte(erase);
         *editor(&mut state) = TextEditor::from("one two three");
         state.handle_input_bytes(b"\x1b[1;5D\x1b[1;5D_");
         assert_eq!(
             editor(&mut state).as_str(),
             "one _two three",
-            "ctrl+left, field {field}"
+            "ctrl+left, field {field}, erase {erase:?}"
         );
         state.handle_input_bytes(b"\x1b[1;5C=");
         assert_eq!(
             editor(&mut state).as_str(),
             "one _two= three",
-            "ctrl+right, field {field}"
+            "ctrl+right, field {field}, erase {erase:?}"
         );
         state.handle_input_bytes(b"\x08");
         assert_eq!(
             editor(&mut state).as_str(),
             "one _two three",
-            "ctrl+backspace, field {field}"
+            "ctrl+backspace, field {field}, erase {erase:?}"
         );
         state.handle_input_bytes(b"\x08");
         assert_eq!(
             editor(&mut state).as_str(),
             "one  three",
-            "ctrl+backspace word, field {field}"
+            "ctrl+backspace word, field {field}, erase {erase:?}"
         );
         state.handle_input_bytes(b"\x1b[3;5~");
         assert_eq!(
             editor(&mut state).as_str(),
             "one ",
-            "ctrl+delete, field {field}"
+            "ctrl+delete, field {field}, erase {erase:?}"
         );
     }
 }
