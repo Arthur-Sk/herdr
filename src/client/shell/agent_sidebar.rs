@@ -108,7 +108,43 @@ enum AgentPanelRow {
         group: super::folders::AgentGroup,
         count: usize,
         status: crate::api::schema::AgentStatus,
+        collapsed: bool,
     },
+}
+
+/// The widths of a list's folder counts, so they stand in columns: waiting
+/// ("9○"), working ("4●") and the total. A column no folder needs is left
+/// out. Each mark is followed by a blank, which a wide-drawn mark may spill
+/// into without covering a digit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct FolderCountColumns {
+    waiting: u16,
+    working: u16,
+    total: u16,
+}
+
+impl FolderCountColumns {
+    pub(super) fn of<'a>(folders: impl IntoIterator<Item = &'a super::folders::FolderRow>) -> Self {
+        let digits = |count: usize| {
+            if count == 0 {
+                0
+            } else {
+                count.to_string().len() as u16
+            }
+        };
+        folders
+            .into_iter()
+            .fold(Self::default(), |columns, folder| Self {
+                waiting: columns.waiting.max(digits(folder.waiting)),
+                working: columns.working.max(digits(folder.working)),
+                total: columns.total.max(digits(folder.count)),
+            })
+    }
+
+    fn width(self) -> u16 {
+        let field = |digits: u16| if digits == 0 { 0 } else { digits + 2 };
+        field(self.waiting) + field(self.working) + self.total
+    }
 }
 
 pub(super) fn render_agent_panel(
@@ -162,10 +198,12 @@ pub(super) fn render_agent_panel(
                         group,
                         count,
                         status,
+                        collapsed,
                     } => Some(AgentPanelRow::Group {
                         group,
                         count,
                         status,
+                        collapsed,
                     }),
                 })
                 .collect::<Vec<_>>()
@@ -178,11 +216,23 @@ pub(super) fn render_agent_panel(
     // A list too short for them keeps every line for the agents.
     let rows = if area.height < 8 {
         rows.into_iter()
-            .filter(|row| !matches!(row, AgentPanelRow::Group { .. }))
+            .filter(|row| {
+                !matches!(
+                    row,
+                    AgentPanelRow::Group {
+                        collapsed: false,
+                        ..
+                    }
+                )
+            })
             .collect()
     } else {
         rows
     };
+    let columns = FolderCountColumns::of(rows.iter().filter_map(|row| match row {
+        AgentPanelRow::Folder(folder) => Some(folder),
+        _ => None,
+    }));
     let empty_message = (snapshot.agent_view_label.is_some() || view.filter.is_active())
         .then_some(" no matching agents");
     render_agent_list(
@@ -199,7 +249,7 @@ pub(super) fn render_agent_panel(
         },
         |buffer, rect, row, hits| match row {
             AgentPanelRow::Folder(folder) => {
-                render_folder_row(buffer, rect, folder, view, config);
+                render_folder_row(buffer, rect, folder, columns, view, config);
                 hits.folders.push(FolderHit {
                     rect,
                     section: super::folders::FolderSection::Agents,
@@ -215,7 +265,11 @@ pub(super) fn render_agent_panel(
                 group,
                 count,
                 status,
-            } => render_group_row(buffer, rect, *group, *count, *status, config),
+                collapsed,
+            } => {
+                hits.agent_groups.push((rect, *group));
+                render_group_row(buffer, rect, *group, *count, *status, *collapsed, config);
+            }
         },
     );
 }
@@ -228,13 +282,21 @@ fn render_group_row(
     group: super::folders::AgentGroup,
     count: usize,
     status: crate::api::schema::AgentStatus,
+    collapsed: bool,
     config: &ClientShellConfig,
 ) {
     let palette = &config.palette;
-    let color = status_color(status, palette);
+    let (icon, color) = if group == super::folders::AgentGroup::Todo {
+        ("▌", palette.mauve)
+    } else {
+        (
+            status_icon(status, config.status_indicators),
+            status_color(status, palette),
+        )
+    };
     let label = format!(
-        " {} {} {count} ",
-        status_icon(status, config.status_indicators),
+        " {} {icon} {} {count} ",
+        if collapsed { "▸" } else { "▾" },
         group.label()
     );
     let width = display_width(&label).min(rect.width as usize) as u16;
@@ -264,6 +326,7 @@ pub(super) fn render_folder_row(
     buffer: &mut Buffer,
     rect: Rect,
     folder: &super::folders::FolderRow,
+    columns: FolderCountColumns,
     view: &super::render::SidebarFolderView<'_>,
     config: &ClientShellConfig,
 ) {
@@ -283,46 +346,60 @@ pub(super) fn render_folder_row(
         .saturating_mul(2)
         .saturating_add(1)
         .min(rect.width.saturating_sub(4));
-    // What waits and what works inside, so a folder shows it even collapsed.
+    // What waits and what works inside, in columns shared by the list, so a
+    // folder shows it even collapsed.
+    let working_status = crate::api::schema::AgentStatus::Working;
+    let field = |count: usize, digits: u16, status| {
+        let text = if count == 0 {
+            " ".repeat(usize::from(digits) + 2)
+        } else {
+            format!(
+                "{count:>width$}{} ",
+                status_icon(status, config.status_indicators),
+                width = usize::from(digits)
+            )
+        };
+        (text, Style::default().fg(status_color(status, palette)))
+    };
     let mut right = Vec::<(String, Style)>::new();
-    if folder.waiting > 0 {
-        right.push((
-            format!(
-                "{}{}",
-                status_icon(folder.waiting_status, config.status_indicators),
-                folder.waiting
-            ),
-            Style::default().fg(status_color(folder.waiting_status, palette)),
+    if columns.waiting > 0 {
+        right.push(field(
+            folder.waiting,
+            columns.waiting,
+            folder.waiting_status,
         ));
     }
-    if folder.working > 0 {
-        let working = crate::api::schema::AgentStatus::Working;
-        right.push((
-            format!(
-                "{}{}",
-                status_icon(working, config.status_indicators),
-                folder.working
-            ),
-            Style::default().fg(status_color(working, palette)),
-        ));
+    if columns.working > 0 {
+        right.push(field(folder.working, columns.working, working_status));
     }
-    if folder.count > 0 {
+    if columns.total > 0 {
         right.push((
-            folder.count.to_string(),
+            if folder.count == 0 {
+                " ".repeat(usize::from(columns.total))
+            } else {
+                format!(
+                    "{:>width$}",
+                    folder.count,
+                    width = usize::from(columns.total)
+                )
+            },
             Style::default().fg(palette.overlay0),
         ));
     }
-    let right_width = right
-        .iter()
-        .map(|(text, _)| display_width(text) + 1)
-        .sum::<usize>() as u16;
-    let name_style = Style::default()
+    // The counts and the blank that keeps them off the edge.
+    let right_width = columns.width();
+    let mut name_style = Style::default()
         .fg(if drop_target {
             palette.text
+        } else if folder.muted {
+            palette.overlay0
         } else {
             palette.accent
         })
         .add_modifier(Modifier::BOLD);
+    if folder.muted {
+        name_style = name_style.add_modifier(Modifier::ITALIC);
+    }
     let x = rect.x + indent;
     put_text(
         buffer,
@@ -335,7 +412,7 @@ pub(super) fn render_folder_row(
     let name_width = rect
         .right()
         .saturating_sub(x + 2)
-        .saturating_sub(right_width + 1);
+        .saturating_sub(right_width + 2);
     put_text(
         buffer,
         x + 2,
@@ -344,12 +421,12 @@ pub(super) fn render_folder_row(
         super::folders::folder_name(&folder.path),
         name_style,
     );
-    if right_width + 6 <= rect.width {
-        let mut right_x = rect.right().saturating_sub(right_width);
+    if right_width + 7 <= rect.width {
+        let mut right_x = rect.right().saturating_sub(right_width + 1);
         for (text, style) in right {
             let width = display_width(&text) as u16;
             put_text(buffer, right_x, rect.y, width, &text, style);
-            right_x += width + 1;
+            right_x += width;
         }
     }
     if folder.collapsed && folder.todo {

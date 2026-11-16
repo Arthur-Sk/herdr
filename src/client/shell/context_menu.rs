@@ -107,12 +107,20 @@ impl ClientContextMenuOverlay {
                 }
                 items
             }
-            ClientContextMenuTarget::Folder { .. } => vec![
+            ClientContextMenuTarget::Folder { muted, .. } => vec![
                 item("New subfolder...", Action::NewFolder),
                 item("Move up", Action::MoveFolderUp),
                 item("Move down", Action::MoveFolderDown),
                 item("Move to folder...", Action::MoveToFolder),
                 item("Rename...", Action::RenameFolder),
+                item(
+                    if *muted {
+                        "Unmute notifications"
+                    } else {
+                        "Mute notifications"
+                    },
+                    Action::ToggleMuteFolder,
+                ),
                 item("Delete folder", Action::DeleteFolder),
                 item("Show only this folder", Action::ShowOnlyFolder),
                 item("Expand all", Action::ExpandAllFolders),
@@ -307,7 +315,11 @@ impl ClientShellState {
         y: u16,
     ) {
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
-            target: ClientContextMenuTarget::Folder { section, path },
+            target: ClientContextMenuTarget::Folder {
+                section,
+                muted: self.folders.muted.contains(&path),
+                path,
+            },
             x,
             y,
             highlighted: 0,
@@ -409,7 +421,7 @@ impl ClientShellState {
                     self.persist_chrome_preferences(outcome);
                 }
             }
-            ClientContextMenuTarget::Folder { section, path } => {
+            ClientContextMenuTarget::Folder { section, path, .. } => {
                 self.activate_folder_action(section, Some(path), action, outcome)
             }
             ClientContextMenuTarget::SidebarSection { section, .. } => {

@@ -895,6 +895,16 @@ impl ClientShellState {
                     pane_id: agents.get(index)?.clone(),
                 }))
             }
+            KeybindAction::NextWaitingAgent => {
+                let agents = super::folders::waiting_agent_order(snapshot);
+                let current = agents.iter().position(|pane_id| {
+                    Some(pane_id.as_str()) == snapshot.focused_pane_id.as_deref()
+                });
+                let next = current.map_or(0, |current| (current + 1) % agents.len().max(1));
+                Some(Method::PaneFocus(PaneTarget {
+                    pane_id: agents.get(next)?.clone(),
+                }))
+            }
             KeybindAction::PreviousAgent | KeybindAction::NextAgent => {
                 let agents = self.sidebar_agent_order(snapshot);
                 if agents.is_empty() {

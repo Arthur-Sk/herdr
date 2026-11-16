@@ -191,6 +191,9 @@ impl ClientShellState {
                     }
                 }
             }
+            if self.notification_muted(&pending.endpoint_id, &pending.event) {
+                continue;
+            }
             let target_active =
                 self.notification_target_is_active(&pending.endpoint_id, &pending.event);
             let suppress_external = target_active && self.outer_focused != Some(false);
@@ -250,6 +253,38 @@ impl ClientShellState {
             }
         }
         (effects, repaint)
+    }
+
+    /// An agent's done and needs-attention notifications are dropped while
+    /// a folder holding it is muted.
+    fn notification_muted(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        event: &SemanticNotification,
+    ) -> bool {
+        if *endpoint_id != self.active_endpoint_id
+            || !matches!(
+                event.kind,
+                SemanticNotificationKind::Finished | SemanticNotificationKind::NeedsAttention
+            )
+        {
+            return false;
+        }
+        let Some(pane_id) = event.pane_id.as_deref() else {
+            return false;
+        };
+        let workspace_id = self
+            .snapshot
+            .as_deref()
+            .and_then(|snapshot| {
+                snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.pane_id == pane_id)
+                    .map(|agent| agent.workspace_id.clone())
+            })
+            .or_else(|| event.workspace_id.clone());
+        workspace_id.is_some_and(|workspace_id| self.folders.agent_muted(pane_id, &workspace_id))
     }
 
     #[cfg(windows)]

@@ -130,6 +130,8 @@ pub(super) struct ShellHitMap {
     pub(super) worktree_search: Rect,
     pub(super) worktree_rows: Vec<(Rect, usize)>,
     pub(super) folder_choice_rows: Vec<(Rect, usize)>,
+    /// Heads of the priority view's groups; a click folds one.
+    pub(super) agent_groups: Vec<(Rect, super::folders::AgentGroup)>,
     pub(super) folder_picker_popup: Rect,
     pub(super) help_popup: Rect,
     pub(super) help_scrollbar: Rect,
@@ -274,6 +276,8 @@ pub(super) enum ClientChromeDrag {
     Agent {
         pane_id: String,
         target: Option<FolderDropTarget>,
+        /// Over another agent of the folder view: placed before or after it.
+        beside: Option<(String, bool)>,
     },
     Folder {
         path: String,
@@ -626,6 +630,7 @@ pub(super) enum ClientContextMenuAction {
     MoveFolderUp,
     MoveFolderDown,
     ToggleAgentView,
+    ToggleMuteFolder,
 }
 
 /// What a folder dialog files: a space (by the first row of its worktree
@@ -688,6 +693,7 @@ pub(super) enum ClientContextMenuTarget {
     Folder {
         section: super::folders::FolderSection,
         path: String,
+        muted: bool,
     },
     /// The header or empty space of the spaces or agents list.
     SidebarSection {

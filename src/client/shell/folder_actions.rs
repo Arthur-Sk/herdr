@@ -259,12 +259,27 @@ impl ClientShellState {
                 };
                 (what, target)
             }
-            ClientChromeDrag::Agent { pane_id, target } => {
+            ClientChromeDrag::Agent {
+                pane_id,
+                target,
+                beside,
+            } => {
                 let what = self.folder_item_label(&FolderItem::Agent {
                     pane_id: pane_id.clone(),
                     workspace_id: String::new(),
                 });
-                (what, target.as_ref().map(drop_target_text))
+                let target = match beside {
+                    Some((sibling, after)) => Some(format!(
+                        "{} {}",
+                        if *after { "after" } else { "before" },
+                        self.folder_item_label(&FolderItem::Agent {
+                            pane_id: sibling.clone(),
+                            workspace_id: String::new(),
+                        })
+                    )),
+                    None => target.as_ref().map(drop_target_text),
+                };
+                (what, target)
             }
             ClientChromeDrag::Folder { path, target } => (
                 format!("▸ {}", cut_label(folders::folder_name(path), 24)),
@@ -497,6 +512,12 @@ impl ClientShellState {
                 }
             }
             ClientContextMenuAction::ToggleAgentView => self.toggle_agent_view(outcome),
+            ClientContextMenuAction::ToggleMuteFolder => {
+                if let Some(path) = path {
+                    self.folders.toggle_muted(&path);
+                    self.persist_chrome_preferences(outcome);
+                }
+            }
             ClientContextMenuAction::FilterSidebar => self.open_sidebar_filter(),
             ClientContextMenuAction::MoveShownToFolder => {
                 self.open_move_to_folder(FolderItem::Shown(section))
@@ -731,6 +752,55 @@ impl ClientShellState {
                     && self.folders.space_folder(workspace_id) == Some(path)
             })
             .map(str::to_owned)
+    }
+
+    /// The agent a dragged agent would sit beside in the folder view, and
+    /// whether after it (dragged from above).
+    pub(super) fn agent_beside_at(
+        &self,
+        pane_id: &str,
+        point: (u16, u16),
+    ) -> Option<(String, bool)> {
+        if self.agents_by_priority() {
+            return None;
+        }
+        let (_, sibling) = self
+            .hits
+            .agents
+            .iter()
+            .find(|(rect, other)| super::contains(*rect, point) && other != pane_id)?;
+        let snapshot = self.snapshot.as_deref()?;
+        let order = folders::agent_panel_order(snapshot, &self.folders, false);
+        let position = |pane_id: &str| order.iter().position(|candidate| candidate == pane_id);
+        Some((sibling.clone(), position(pane_id) < position(sibling)))
+    }
+
+    /// Places a dropped agent before or after another of its new folder.
+    pub(super) fn place_dropped_agent(
+        &mut self,
+        pane_id: &str,
+        sibling: &str,
+        after: bool,
+        outcome: &mut ClientShellInput,
+    ) {
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return;
+        };
+        let folder_of = |pane_id: &str| {
+            snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.pane_id == pane_id)
+                .map(|agent| self.folders.agent_folder(pane_id, &agent.workspace_id))
+        };
+        let folder = folder_of(sibling);
+        let siblings = folders::agent_panel_order(snapshot, &self.folders, false)
+            .into_iter()
+            .filter(|candidate| folder_of(candidate) == folder)
+            .collect::<Vec<_>>();
+        if self.folders.place_agent(pane_id, sibling, after, siblings) {
+            self.persist_chrome_preferences(outcome);
+        }
     }
 
     pub(super) fn drop_agent(

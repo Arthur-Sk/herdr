@@ -42,6 +42,16 @@ pub(super) struct SidebarFolders {
     /// The sidebar filter, kept across restarts like the rest.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(super) filter: String,
+    /// Folders whose agents raise no toasts, sounds or system notifications.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(super) muted: BTreeSet<String>,
+    /// Groups of the priority view folded to their head ("todo", "other").
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(super) collapsed_groups: BTreeSet<String>,
+    /// Public pane ids in the order agents were arranged by hand inside their
+    /// folders; agents missing here follow in their spaces' order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) agent_order: Vec<String>,
 }
 
 /// Reads a folder path as typed: levels split on "/", blanks dropped. None is
@@ -103,6 +113,9 @@ impl SidebarFolders {
             && self.collapsed_agents.is_empty()
             && self.order.is_empty()
             && self.filter.is_empty()
+            && self.muted.is_empty()
+            && self.collapsed_groups.is_empty()
+            && self.agent_order.is_empty()
     }
 
     pub(super) fn space_folder(&self, workspace_id: &str) -> Option<&str> {
@@ -248,6 +261,7 @@ impl SidebarFolders {
         let parent = folder_parent(path).map(str::to_owned);
         self.folders.remove(path);
         self.order.retain(|ordered| ordered != path);
+        self.muted.remove(path);
         self.collapsed_spaces.remove(path);
         self.collapsed_agents.remove(path);
         self.rebase(path, parent.as_deref());
@@ -279,6 +293,7 @@ impl SidebarFolders {
         self.order = order;
         self.collapsed_spaces = rebase_set(&self.collapsed_spaces);
         self.collapsed_agents = rebase_set(&self.collapsed_agents);
+        self.muted = rebase_set(&self.muted);
         self.spaces = std::mem::take(&mut self.spaces)
             .into_iter()
             .filter_map(|(workspace_id, path)| match moved(&path) {
@@ -349,7 +364,60 @@ impl SidebarFolders {
         self.spaces.retain(|workspace_id, _| !closed(workspace_id));
         self.agents
             .retain(|pane_id, _| !closed(workspace_of_pane(pane_id)));
+        self.agent_order
+            .retain(|pane_id| !closed(workspace_of_pane(pane_id)));
         live
+    }
+
+    /// An agent's notifications are muted when its folder or a folder above
+    /// it is.
+    pub(super) fn agent_muted(&self, pane_id: &str, workspace_id: &str) -> bool {
+        !self.muted.is_empty()
+            && self
+                .agent_folder(pane_id, workspace_id)
+                .is_some_and(|folder| {
+                    folder_and_ancestors(folder).any(|path| self.muted.contains(path))
+                })
+    }
+
+    fn mark_muted(&self, mut folder: FolderRow) -> FolderRow {
+        folder.muted = folder_and_ancestors(&folder.path).any(|path| self.muted.contains(path));
+        folder
+    }
+
+    pub(super) fn toggle_muted(&mut self, path: &str) {
+        if !self.muted.remove(path) {
+            self.muted.insert(path.to_owned());
+        }
+    }
+
+    pub(super) fn toggle_group(&mut self, group: AgentGroup) {
+        if !self.collapsed_groups.remove(group.label()) {
+            self.collapsed_groups.insert(group.label().to_owned());
+        }
+    }
+
+    /// Puts an agent just before or after another in the hand-made order of
+    /// `siblings`: the agents of their folder as the list shows them.
+    pub(super) fn place_agent(
+        &mut self,
+        pane_id: &str,
+        sibling: &str,
+        after: bool,
+        mut siblings: Vec<String>,
+    ) -> bool {
+        if pane_id == sibling {
+            return false;
+        }
+        siblings.retain(|candidate| candidate != pane_id);
+        let Some(index) = siblings.iter().position(|candidate| candidate == sibling) else {
+            return false;
+        };
+        siblings.insert(index + usize::from(after), pane_id.to_owned());
+        self.agent_order
+            .retain(|ordered| !siblings.contains(ordered));
+        self.agent_order.extend(siblings);
+        true
     }
 
     /// Folders shown in a section without a filter: those holding something
@@ -428,6 +496,8 @@ pub(super) struct FolderRow {
     pub(super) working: usize,
     /// The most urgent state among the waiting ones: what colours their count.
     pub(super) waiting_status: AgentStatus,
+    /// Its notifications are muted, by itself or a folder above it.
+    pub(super) muted: bool,
     /// An agent inside is marked TODO.
     pub(super) todo: bool,
 }
@@ -451,6 +521,7 @@ pub(super) enum AgentListRow {
         count: usize,
         /// The most urgent state in the group: what colours its head.
         status: AgentStatus,
+        collapsed: bool,
     },
 }
 
@@ -460,13 +531,16 @@ pub(super) enum AgentGroup {
     /// Blocked, done or idle: the agent waits for a person.
     Waiting,
     Working,
+    /// Marked TODO: put aside to come back to, whatever its state.
+    Todo,
     /// No state known: shells and agents not yet recognised.
     Other,
 }
 
 impl AgentGroup {
-    pub(super) fn of(status: AgentStatus) -> Self {
+    pub(super) fn of(status: AgentStatus, todo: bool) -> Self {
         match status {
+            _ if todo => Self::Todo,
             AgentStatus::Blocked | AgentStatus::Done | AgentStatus::Idle => Self::Waiting,
             AgentStatus::Working => Self::Working,
             AgentStatus::Unknown => Self::Other,
@@ -477,6 +551,7 @@ impl AgentGroup {
         match self {
             Self::Waiting => "waiting",
             Self::Working => "working",
+            Self::Todo => "todo",
             Self::Other => "other",
         }
     }
@@ -585,7 +660,7 @@ fn build_tree<T: Clone>(
             let stat = stats.entry(path.to_owned()).or_default();
             stat.count += 1;
             stat.todo |= item.todo;
-            match AgentGroup::of(item.status) {
+            match AgentGroup::of(item.status, item.todo) {
                 AgentGroup::Waiting => {
                     stat.waiting += 1;
                     if stat
@@ -596,7 +671,7 @@ fn build_tree<T: Clone>(
                     }
                 }
                 AgentGroup::Working => stat.working += 1,
-                AgentGroup::Other => {}
+                AgentGroup::Todo | AgentGroup::Other => {}
             }
             if item.focused {
                 stat.focused_item.get_or_insert(index);
@@ -635,6 +710,7 @@ fn walk_tree<T: Clone>(
             waiting_status: stats
                 .and_then(|stats| stats.waiting_status)
                 .unwrap_or(AgentStatus::Idle),
+            muted: false,
             todo: stats.is_some_and(|stats| stats.todo),
         }));
         if !collapsed {
@@ -720,7 +796,7 @@ pub(super) fn spaces_rows(
     )
     .into_iter()
     .flat_map(|row| match row {
-        TreeRow::Folder(folder) => vec![SpacesRow::Folder(folder)],
+        TreeRow::Folder(folder) => vec![SpacesRow::Folder(folders.mark_muted(folder))],
         TreeRow::Item { value, depth } => value
             .into_iter()
             .map(|entry| SpacesRow::Space { entry, depth })
@@ -786,8 +862,20 @@ pub(super) fn agent_list_rows(
     folders: &SidebarFolders,
     filter: &SidebarFilter,
 ) -> Vec<AgentListRow> {
+    // Agents arranged by hand come first in their folder, in that order.
+    let mut order = order.iter().collect::<Vec<_>>();
+    if !folders.agent_order.is_empty() {
+        let rank = |pane_id: &String| {
+            folders
+                .agent_order
+                .iter()
+                .position(|ordered| ordered == pane_id)
+                .unwrap_or(usize::MAX)
+        };
+        order.sort_by_key(|pane_id| rank(pane_id));
+    }
     let items = order
-        .iter()
+        .into_iter()
         .filter_map(|pane_id| {
             let agent = snapshot
                 .agents
@@ -824,7 +912,7 @@ pub(super) fn agent_list_rows(
     )
     .into_iter()
     .map(|row| match row {
-        TreeRow::Folder(folder) => AgentListRow::Folder(folder),
+        TreeRow::Folder(folder) => AgentListRow::Folder(folders.mark_muted(folder)),
         TreeRow::Item { value, depth } => AgentListRow::Agent {
             pane_id: value,
             depth,
@@ -854,10 +942,33 @@ pub(super) fn agent_order_in_folders(
         .collect()
 }
 
-/// Every agent by how soon it needs a person: blocked, done, idle, working,
-/// unknown; the latest change first within each state.
+/// Every agent by how soon it needs a person: waiting (blocked, done, idle),
+/// working, marked TODO, unknown; the latest change first within each state.
 pub(super) fn priority_agent_order(snapshot: &ClientShellSnapshot) -> Vec<String> {
     let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
+    agents.sort_by_key(|agent| {
+        (
+            AgentGroup::of(agent.agent_status, agent_is_todo(agent)),
+            attention_rank(agent.agent_status),
+            std::cmp::Reverse(agent.state_change_seq),
+        )
+    });
+    agents
+        .into_iter()
+        .map(|agent| agent.pane_id.clone())
+        .collect()
+}
+
+/// The agents waiting for a person, most urgent first: blocked, done, idle;
+/// agents marked TODO are left out. What "next waiting agent" walks.
+pub(super) fn waiting_agent_order(snapshot: &ClientShellSnapshot) -> Vec<String> {
+    let mut agents = snapshot
+        .agents
+        .iter()
+        .filter(|agent| {
+            AgentGroup::of(agent.agent_status, agent_is_todo(agent)) == AgentGroup::Waiting
+        })
+        .collect::<Vec<_>>();
     agents.sort_by_key(|agent| {
         (
             attention_rank(agent.agent_status),
@@ -894,27 +1005,37 @@ pub(super) fn agent_panel_rows(
                 .iter()
                 .find(|agent| agent.pane_id == pane_id)?;
             let folder = folders.agent_folder(&agent.pane_id, &agent.workspace_id);
-            (!filter.is_active() || filter.matches(&agent_text(snapshot, agent, folder)))
-                .then_some((pane_id, agent.agent_status))
+            (!filter.is_active() || filter.matches(&agent_text(snapshot, agent, folder))).then(
+                || {
+                    (
+                        pane_id,
+                        AgentGroup::of(agent.agent_status, agent_is_todo(agent)),
+                        agent.agent_status,
+                    )
+                },
+            )
         })
         .collect::<Vec<_>>();
     let mut rows = Vec::new();
-    for (index, (pane_id, status)) in agents.iter().enumerate() {
-        let group = AgentGroup::of(*status);
-        if index == 0 || AgentGroup::of(agents[index - 1].1) != group {
+    for (index, (pane_id, group, status)) in agents.iter().enumerate() {
+        let collapsed = folders.collapsed_groups.contains(group.label());
+        if index == 0 || agents[index - 1].1 != *group {
             rows.push(AgentListRow::Group {
-                group,
+                group: *group,
                 count: agents
                     .iter()
-                    .filter(|(_, status)| AgentGroup::of(*status) == group)
+                    .filter(|(_, candidate, _)| candidate == group)
                     .count(),
                 status: *status,
+                collapsed,
             });
         }
-        rows.push(AgentListRow::Agent {
-            pane_id: pane_id.clone(),
-            depth: 0,
-        });
+        if !collapsed {
+            rows.push(AgentListRow::Agent {
+                pane_id: pane_id.clone(),
+                depth: 0,
+            });
+        }
     }
     rows
 }

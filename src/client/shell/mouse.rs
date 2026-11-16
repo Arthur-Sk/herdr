@@ -1235,13 +1235,17 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
-                Some(ClientChromeDrag::Agent { .. }) => {
+                Some(ClientChromeDrag::Agent { pane_id, .. }) => {
+                    let beside = self.agent_beside_at(&pane_id.clone(), point);
                     let target = self.sidebar_folder_target_at(point);
                     if let Some(ClientChromeDrag::Agent {
-                        target: current, ..
+                        target: current,
+                        beside: current_beside,
+                        ..
                     }) = self.chrome_drag.as_mut()
                     {
                         *current = target;
+                        *current_beside = beside;
                     }
                     outcome.repaint = true;
                     return;
@@ -1281,8 +1285,13 @@ impl ClientShellState {
                 if delta >= 1 {
                     let pane_id = press.pane_id.clone();
                     let target = self.sidebar_folder_target_at(point);
+                    let beside = self.agent_beside_at(&pane_id, point);
                     self.agent_press = None;
-                    self.chrome_drag = Some(ClientChromeDrag::Agent { pane_id, target });
+                    self.chrome_drag = Some(ClientChromeDrag::Agent {
+                        pane_id,
+                        target,
+                        beside,
+                    });
                     outcome.repaint = true;
                 }
                 return;
@@ -1332,9 +1341,17 @@ impl ClientShellState {
                 self.agent_press = None;
                 self.folder_press = None;
                 match drag {
-                    ClientChromeDrag::Agent { pane_id, target } => {
+                    ClientChromeDrag::Agent {
+                        pane_id,
+                        target,
+                        beside,
+                    } => {
+                        let beside = self.agent_beside_at(&pane_id, point).or(beside);
                         if let Some(target) = self.sidebar_folder_target_at(point).or(target) {
                             self.drop_agent(&pane_id, target, outcome);
+                        }
+                        if let Some((sibling, after)) = beside {
+                            self.place_dropped_agent(&pane_id, &sibling, after, outcome);
                         }
                         outcome.repaint = true;
                     }
@@ -2230,6 +2247,18 @@ impl ClientShellState {
                         .tab_scroll
                         .saturating_add(1)
                         .min(tab_count.saturating_sub(1));
+                    outcome.repaint = true;
+                    return;
+                }
+                if let Some(group) = self
+                    .hits
+                    .agent_groups
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, group)| *group)
+                {
+                    self.folders.toggle_group(group);
+                    self.persist_chrome_preferences(outcome);
                     outcome.repaint = true;
                     return;
                 }

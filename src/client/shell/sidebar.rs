@@ -254,6 +254,12 @@ pub(crate) fn render_sidebar(
             .collect(),
     };
     use super::super::folders::SpacesRow;
+    let folder_counts = crate::client::shell::agent_sidebar::FolderCountColumns::of(
+        rows.iter().filter_map(|row| match row {
+            SpacesRow::Folder(folder) => Some(folder),
+            SpacesRow::Space { .. } => None,
+        }),
+    );
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -352,6 +358,7 @@ pub(crate) fn render_sidebar(
                     buffer,
                     rect,
                     folder,
+                    folder_counts,
                     &state.folder_view,
                     config,
                 );

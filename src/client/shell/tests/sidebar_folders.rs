@@ -665,7 +665,7 @@ fn priority_view_puts_waiting_then_working_then_the_rest() {
         .lines()
         .rfind(|line| line.contains("▾ ASOUP"))
         .expect("ASOUP row");
-    assert!(asoup.contains("●1 2 "), "{asoup:?}");
+    assert!(asoup.contains("1● 2 "), "{asoup:?}");
 
     let toggle = state.hits.agent_sort_toggle;
     click(&mut state, (toggle.x, toggle.y));
@@ -725,6 +725,156 @@ fn layout_view_and_filter_survive_a_restart() {
     assert!(reloaded.agents_by_priority());
     assert_eq!(reloaded.sidebar_filter, "review");
     std::fs::remove_file(path).expect("remove preferences");
+}
+
+fn todo_token() -> (String, String) {
+    (crate::pane_todo::TODO_TOKEN.to_owned(), "1".to_owned())
+}
+
+#[test]
+fn folder_counts_stand_in_columns_with_room_after_each_mark() {
+    let mut state = state_with(filed(&[("w1", "a"), ("w2", "b"), ("w3", "b")]));
+    set_statuses(
+        &mut state,
+        [
+            AgentStatus::Working,
+            AgentStatus::Blocked,
+            AgentStatus::Idle,
+        ],
+    );
+    let text = compose(&mut state);
+    let rows = text
+        .lines()
+        .skip_while(|line| !line.contains(" agents"))
+        .filter(|line| line.contains("▾ a ") || line.contains("▾ b "))
+        .map(|line| line.chars().take(26).collect::<String>())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2, "{text}");
+    // Waiting, working and total columns line up; each mark has a blank after it.
+    assert!(rows[0].ends_with("    1● 1 │"), "{rows:?}");
+    assert!(rows[1].ends_with(" 2●    2 │"), "{rows:?}");
+}
+
+#[test]
+fn todo_agents_get_their_own_group_and_groups_fold() {
+    let mut state = state_with(filed(&[("w2", "ASOUP"), ("w3", "ASOUP")]));
+    let mut snapshot = state.snapshot.clone().unwrap();
+    snapshot.agents[2].tokens.push(todo_token());
+    state.set_snapshot(snapshot);
+    state.config.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+    let text = compose(&mut state);
+    let line_of = |needle: &str| text.lines().position(|line| line.contains(needle));
+    assert!(
+        line_of("waiting 2").is_some() && line_of("waiting 2") < line_of("todo 1"),
+        "{text}"
+    );
+    assert_eq!(shown_agents(&state), ["w1:p1", "w2:p1", "w3:p1"]);
+
+    // A click folds a group to its head, kept in the preferences.
+    let (head, _) = state.hits.agent_groups[0];
+    click(&mut state, (head.x + 2, head.y));
+    assert!(state.folders.collapsed_groups.contains("waiting"));
+    let text = compose(&mut state);
+    assert!(text.contains("▸ ○ waiting 2"), "{text}");
+    assert_eq!(shown_agents(&state), ["w3:p1"]);
+
+    // The folder counts the TODO agent with neither waiting nor working.
+    state.config.agent_panel_sort = crate::config::AgentPanelSortConfig::Spaces;
+    let text = compose(&mut state);
+    let asoup = text
+        .lines()
+        .rfind(|line| line.contains("▾ ASOUP"))
+        .expect("ASOUP row");
+    assert!(asoup.contains("1○ 2 "), "{asoup:?}");
+}
+
+#[test]
+fn next_waiting_agent_walks_blocked_then_idle_and_skips_todo() {
+    let mut state = state_with(SidebarFolders::default());
+    set_statuses(
+        &mut state,
+        [AgentStatus::Idle, AgentStatus::Blocked, AgentStatus::Idle],
+    );
+    let mut snapshot = state.snapshot.clone().unwrap();
+    snapshot.agents[2].tokens.push(todo_token());
+    state.set_snapshot(snapshot);
+    let focus_of = |state: &mut ClientShellState| {
+        let mut outcome = ClientShellInput::default();
+        state.record_binding(
+            crate::input::KeybindMatch::Action(crate::input::KeybindAction::NextWaitingAgent),
+            &mut outcome,
+        );
+        match &outcome.actions[..] {
+            [ClientShellAction::Endpoint { request, .. }] => match &request.method {
+                crate::api::schema::Method::PaneFocus(target) => target.pane_id.clone(),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    };
+    // w1 is focused: the next waiting one is the blocked w2, then back to w1.
+    assert_eq!(focus_of(&mut state), "w2:p1");
+    let mut snapshot = state.snapshot.clone().unwrap();
+    snapshot.focused_pane_id = Some("w2:p1".into());
+    state.set_snapshot(snapshot);
+    assert_eq!(focus_of(&mut state), "w1:p1");
+}
+
+#[test]
+fn dragging_an_agent_onto_another_arranges_them_by_hand() {
+    let mut state = state_with(SidebarFolders::default());
+    compose(&mut state);
+    assert_eq!(shown_agents(&state), ["w1:p1", "w2:p1", "w3:p1"]);
+    let from = agent_at(&state, "w3:p1");
+    let to = agent_at(&state, "w1:p1");
+    mouse(&mut state, MouseEventKind::Down(MouseButton::Left), from);
+    mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), to);
+    let text = compose(&mut state);
+    assert!(
+        text.contains("«home · battery» → before «client-shell · Fix review notes»"),
+        "{text}"
+    );
+    mouse(&mut state, MouseEventKind::Up(MouseButton::Left), to);
+    compose(&mut state);
+    assert_eq!(shown_agents(&state), ["w3:p1", "w1:p1", "w2:p1"]);
+    let snapshot = state.snapshot.clone().unwrap();
+    assert_eq!(
+        state.sidebar_agent_order(&snapshot),
+        ["w3:p1", "w1:p1", "w2:p1"]
+    );
+}
+
+#[test]
+fn muted_folders_drop_their_agents_notifications() {
+    let mut state = state_with(filed(&[("w2", "Quiet")]));
+    state.config.toast_delay_seconds = 0;
+    compose(&mut state);
+    let at = folder_at(&state, FolderSection::Agents, "Quiet");
+    mouse(&mut state, MouseEventKind::Down(MouseButton::Right), at);
+    choose(&mut state, ClientContextMenuAction::ToggleMuteFolder);
+    assert!(state.folders.muted.contains("Quiet"));
+    let notify = |state: &mut ClientShellState, workspace: &str| {
+        state.receive_notification(
+            &ClientEndpointId::Local,
+            SemanticNotification {
+                kind: SemanticNotificationKind::NeedsAttention,
+                title: "claude needs attention".into(),
+                body: None,
+                sound: Some(SemanticNotificationSound::Request),
+                agent: Some("claude".into()),
+                workspace_id: Some(workspace.into()),
+                tab_id: Some(format!("{workspace}:t1")),
+                pane_id: Some(format!("{workspace}:p1")),
+                position: None,
+            },
+            std::time::Instant::now(),
+        )
+    };
+    let (effects, _) = notify(&mut state, "w2");
+    assert!(effects.is_empty());
+    assert!(state.visible_notification.is_none());
+    let (effects, _) = notify(&mut state, "w3");
+    assert!(!effects.is_empty());
 }
 
 #[test]

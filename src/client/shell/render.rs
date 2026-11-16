@@ -286,7 +286,9 @@ pub(super) fn sidebar_folder_view<'a>(
         None => {}
     };
     match drag {
-        Some(ClientChromeDrag::Agent { pane_id, target }) => {
+        Some(ClientChromeDrag::Agent {
+            pane_id, target, ..
+        }) => {
             set_target(target.as_ref());
             view.dragged_agent = Some(pane_id);
         }
