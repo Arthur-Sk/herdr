@@ -207,6 +207,14 @@ pub(super) enum FolderDropTarget {
     Folder(String),
 }
 
+/// Where a dragged folder lands: into a folder (or the top level), or beside a
+/// sibling, which arranges their level by hand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum FolderMove {
+    Into(FolderDropTarget),
+    Beside { sibling: String, after: bool },
+}
+
 /// Where a dragged space lands: before a space, at the end of the list, or into
 /// a folder. `folder` is None in sidebars without folders.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,7 +277,7 @@ pub(super) enum ClientChromeDrag {
     },
     Folder {
         path: String,
-        target: Option<FolderDropTarget>,
+        target: Option<FolderMove>,
     },
     PaneSplit {
         hit: PaneSplitHit,
@@ -615,6 +623,9 @@ pub(super) enum ClientContextMenuAction {
     ExpandAllFolders,
     CollapseAllFolders,
     MoveShownToFolder,
+    MoveFolderUp,
+    MoveFolderDown,
+    ToggleAgentView,
 }
 
 /// What a folder dialog files: a space (by the first row of its worktree
@@ -630,6 +641,10 @@ pub(super) enum FolderItem {
     },
     /// Every space or agent the sidebar filter shows.
     Shown(super::folders::FolderSection),
+    /// A folder with everything inside it.
+    Folder {
+        path: String,
+    },
 }
 
 /// What a context menu knows about a pane's TODO mark, present only when the
@@ -678,6 +693,7 @@ pub(super) enum ClientContextMenuTarget {
     SidebarSection {
         section: super::folders::FolderSection,
         filtered: bool,
+        agents_by_priority: bool,
     },
 }
 
@@ -1199,8 +1215,8 @@ impl ClientShellState {
             tab_press: None,
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
+            sidebar_filter: preferences.folders.filter.clone(),
             folders: preferences.folders,
-            sidebar_filter: String::new(),
             agent_press: None,
             drag_pointer: None,
             folder_seen_workspaces: HashSet::new(),

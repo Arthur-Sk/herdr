@@ -368,15 +368,44 @@ fn dragging_a_space_files_it_into_a_folder_and_beside_a_space() {
 }
 
 #[test]
-fn dragging_a_folder_nests_it_and_the_header_lifts_it_out() {
+fn dragging_a_folder_arranges_siblings_and_nests_into_others() {
     let mut folders = filed(&[("w2", "THEX")]);
     folders.create("ASOUP");
     let mut state = state_with(folders);
     compose(&mut state);
+    // Onto a sibling: placed before it, by hand from then on.
     let from = folder_at(&state, FolderSection::Spaces, "THEX");
     let to = folder_at(&state, FolderSection::Spaces, "ASOUP");
-    drag(&mut state, from, to);
+    mouse(&mut state, MouseEventKind::Down(MouseButton::Left), from);
+    mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), to);
+    let text = compose(&mut state);
+    assert!(text.contains("▸ THEX → before ▸ ASOUP"), "{text}");
+    mouse(&mut state, MouseEventKind::Up(MouseButton::Left), to);
+    assert_eq!(state.folders.space_folder("w2"), Some("THEX"));
+    assert_eq!(state.folders.sibling_folders(None), ["THEX", "ASOUP"]);
+    let text = compose(&mut state);
+    let line_of = |needle: &str| text.lines().position(|line| line.contains(needle));
+    assert!(line_of("▾ THEX") < line_of("▾ ASOUP"), "{text}");
+
+    // Into a folder through the picker.
+    let at = folder_at(&state, FolderSection::Spaces, "THEX");
+    mouse(&mut state, MouseEventKind::Down(MouseButton::Right), at);
+    choose(&mut state, ClientContextMenuAction::MoveToFolder);
+    let lines = picker_lines(&mut state);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].starts_with("⌂ top level") && lines[0].ends_with("current"));
+    assert_eq!(lines[1], "▸ ASOUP");
+    state.handle_input_bytes(b"asoup");
+    state.handle_input_bytes(b"\r");
     assert_eq!(state.folders.space_folder("w2"), Some("ASOUP/THEX"));
+
+    // Onto a folder of another level: into it.
+    state.folders.create("home");
+    compose(&mut state);
+    let from = folder_at(&state, FolderSection::Spaces, "home");
+    let to = folder_at(&state, FolderSection::Spaces, "ASOUP/THEX");
+    drag(&mut state, from, to);
+    assert!(state.folders.all_paths().contains("ASOUP/THEX/home"));
 
     // A folder cannot go into itself.
     compose(&mut state);
@@ -390,6 +419,25 @@ fn dragging_a_folder_nests_it_and_the_header_lifts_it_out() {
     let header = state.hits.spaces_header;
     drag(&mut state, from, (header.x + 2, header.y));
     assert_eq!(state.folders.space_folder("w2"), Some("THEX"));
+}
+
+#[test]
+fn folder_menu_moves_a_folder_up_and_down() {
+    let mut folders = SidebarFolders::default();
+    for path in ["a", "b", "c"] {
+        folders.create(path);
+    }
+    let mut state = state_with(folders);
+    compose(&mut state);
+    let at = folder_at(&state, FolderSection::Agents, "c");
+    mouse(&mut state, MouseEventKind::Down(MouseButton::Right), at);
+    choose(&mut state, ClientContextMenuAction::MoveFolderUp);
+    assert_eq!(state.folders.sibling_folders(None), ["a", "c", "b"]);
+    compose(&mut state);
+    let at = folder_at(&state, FolderSection::Spaces, "a");
+    mouse(&mut state, MouseEventKind::Down(MouseButton::Right), at);
+    choose(&mut state, ClientContextMenuAction::MoveFolderDown);
+    assert_eq!(state.folders.sibling_folders(None), ["c", "a", "b"]);
 }
 
 #[test]
@@ -589,6 +637,94 @@ fn folders_are_kept_in_chrome_preferences() {
     )
     .unwrap();
     assert!(!empty.contains("folders"), "{empty}");
+}
+
+fn set_statuses(state: &mut ClientShellState, statuses: [AgentStatus; 3]) {
+    let mut snapshot = state.snapshot.clone().unwrap();
+    for (agent, status) in snapshot.agents.iter_mut().zip(statuses) {
+        agent.agent_status = status;
+    }
+    state.set_snapshot(snapshot);
+}
+
+#[test]
+fn priority_view_puts_waiting_then_working_then_the_rest() {
+    let mut state = state_with(filed(&[("w2", "ASOUP"), ("w3", "ASOUP")]));
+    set_statuses(
+        &mut state,
+        [
+            AgentStatus::Working,
+            AgentStatus::Unknown,
+            AgentStatus::Blocked,
+        ],
+    );
+    let text = compose(&mut state);
+    assert!(text.contains("folders"), "{text}");
+    // The agents' folder counts what waits (blocked w3) beside its size.
+    let asoup = text
+        .lines()
+        .rfind(|line| line.contains("▾ ASOUP"))
+        .expect("ASOUP row");
+    assert!(asoup.contains("●1 2 "), "{asoup:?}");
+
+    let toggle = state.hits.agent_sort_toggle;
+    click(&mut state, (toggle.x, toggle.y));
+    let text = compose(&mut state);
+    assert!(text.contains("priority"), "{text}");
+    assert_eq!(shown_agents(&state), ["w3:p1", "w1:p1", "w2:p1"]);
+    let waiting = text.lines().position(|line| line.contains("waiting 1"));
+    let working = text.lines().position(|line| line.contains("working 1"));
+    let other = text.lines().position(|line| line.contains("other 1"));
+    assert!(
+        waiting.is_some() && waiting < working && working < other,
+        "{text}"
+    );
+    let snapshot = state.snapshot.clone().unwrap();
+    assert_eq!(
+        state.sidebar_agent_order(&snapshot),
+        ["w3:p1", "w1:p1", "w2:p1"]
+    );
+
+    // The section menu switches back.
+    let header = state.hits.agents_header;
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Right),
+        (header.x + 2, header.y),
+    );
+    choose(&mut state, ClientContextMenuAction::ToggleAgentView);
+    compose(&mut state);
+    assert_eq!(shown_agents(&state), ["w2:p1", "w3:p1", "w1:p1"]);
+}
+
+#[test]
+fn layout_view_and_filter_survive_a_restart() {
+    let path =
+        std::env::temp_dir().join(format!("herdr-sidebar-layout-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let mut folders = filed(&[("w2", "b")]);
+    folders.create("a");
+    let mut state = state_with(folders);
+    state.config.preferences_path = Some(path.clone());
+    compose(&mut state);
+    let from = folder_at(&state, FolderSection::Spaces, "b");
+    let to = folder_at(&state, FolderSection::Spaces, "a");
+    drag(&mut state, from, to);
+    let toggle = state.hits.agent_sort_toggle;
+    click(&mut state, (toggle.x, toggle.y));
+    let button = state.hits.sidebar_filter_button;
+    click(&mut state, (button.x + 1, button.y));
+    state.handle_input_bytes(b"review");
+    state.handle_input_bytes(b"\r");
+
+    let reloaded = ClientShellState::new(
+        ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone()),
+    );
+    assert_eq!(reloaded.folders.sibling_folders(None), ["b", "a"]);
+    assert_eq!(reloaded.folders.space_folder("w2"), Some("b"));
+    assert!(reloaded.agents_by_priority());
+    assert_eq!(reloaded.sidebar_filter, "review");
+    std::fs::remove_file(path).expect("remove preferences");
 }
 
 #[test]

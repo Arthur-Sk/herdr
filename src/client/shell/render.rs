@@ -291,7 +291,11 @@ pub(super) fn sidebar_folder_view<'a>(
             view.dragged_agent = Some(pane_id);
         }
         Some(ClientChromeDrag::Folder { path, target, .. }) => {
-            set_target(target.as_ref());
+            match target {
+                Some(FolderMove::Into(target)) => set_target(Some(target)),
+                Some(FolderMove::Beside { sibling, .. }) => view.drop_folder = Some(sibling),
+                None => {}
+            }
             view.dragged_folder = Some(path);
         }
         Some(ClientChromeDrag::Workspace { target, .. }) => match target {

@@ -35,6 +35,13 @@ pub(super) struct SidebarFolders {
     pub(super) collapsed_spaces: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub(super) collapsed_agents: BTreeSet<String>,
+    /// Folders in the order they were arranged by hand. Siblings missing here
+    /// follow the arranged ones, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) order: Vec<String>,
+    /// The sidebar filter, kept across restarts like the rest.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(super) filter: String,
 }
 
 /// Reads a folder path as typed: levels split on "/", blanks dropped. None is
@@ -94,6 +101,8 @@ impl SidebarFolders {
             && self.agents.is_empty()
             && self.collapsed_spaces.is_empty()
             && self.collapsed_agents.is_empty()
+            && self.order.is_empty()
+            && self.filter.is_empty()
     }
 
     pub(super) fn space_folder(&self, workspace_id: &str) -> Option<&str> {
@@ -143,6 +152,71 @@ impl SidebarFolders {
         self.folders.insert(path.to_owned());
     }
 
+    /// The folders directly inside `parent` (None: the top level), in the
+    /// order the sidebar shows them.
+    pub(super) fn sibling_folders(&self, parent: Option<&str>) -> Vec<String> {
+        let mut siblings = self
+            .all_paths()
+            .into_iter()
+            .filter(|path| folder_parent(path) == parent)
+            .collect::<Vec<_>>();
+        sort_siblings(&mut siblings, &self.order);
+        siblings
+    }
+
+    /// Puts a folder just before or after a sibling, arranging their level by
+    /// hand from then on.
+    pub(super) fn place_folder(&mut self, path: &str, sibling: &str, after: bool) -> bool {
+        let parent = folder_parent(path);
+        if path == sibling || parent != folder_parent(sibling) {
+            return false;
+        }
+        let mut siblings = self.sibling_folders(parent);
+        let before = siblings.clone();
+        siblings.retain(|candidate| candidate != path);
+        let Some(index) = siblings.iter().position(|candidate| candidate == sibling) else {
+            return false;
+        };
+        siblings.insert(index + usize::from(after), path.to_owned());
+        if siblings == before && siblings.iter().all(|path| self.order.contains(path)) {
+            return false;
+        }
+        self.order
+            .retain(|ordered| folder_parent(ordered) != parent);
+        self.order.extend(siblings);
+        true
+    }
+
+    /// Moves a folder one place up (-1) or down (1) among its siblings.
+    pub(super) fn shift_folder(&mut self, path: &str, delta: isize) -> bool {
+        let siblings = self.sibling_folders(folder_parent(path));
+        let Some(index) = siblings.iter().position(|candidate| candidate == path) else {
+            return false;
+        };
+        let Some(target) = index
+            .checked_add_signed(delta)
+            .and_then(|target| siblings.get(target))
+        else {
+            return false;
+        };
+        self.place_folder(path, &target.clone(), delta > 0)
+    }
+
+    /// Moves a folder with its contents into `parent` (None: the top level),
+    /// where it goes after the folders arranged by hand.
+    pub(super) fn move_folder_into(&mut self, path: &str, parent: Option<&str>) -> bool {
+        let name = folder_name(path);
+        let new_path = match parent {
+            Some(parent) => format!("{parent}/{name}"),
+            None => name.to_owned(),
+        };
+        if folder_parent(path) == parent || !self.rename(path, &new_path) {
+            return false;
+        }
+        self.order.retain(|ordered| ordered != &new_path);
+        true
+    }
+
     /// Every folder: made by hand or holding something, with all their parents.
     pub(super) fn all_paths(&self) -> BTreeSet<String> {
         self.folders
@@ -173,6 +247,7 @@ impl SidebarFolders {
     pub(super) fn delete(&mut self, path: &str) {
         let parent = folder_parent(path).map(str::to_owned);
         self.folders.remove(path);
+        self.order.retain(|ordered| ordered != path);
         self.collapsed_spaces.remove(path);
         self.collapsed_agents.remove(path);
         self.rebase(path, parent.as_deref());
@@ -190,6 +265,18 @@ impl SidebarFolders {
                 .collect::<BTreeSet<_>>()
         };
         self.folders = rebase_set(&self.folders);
+        let mut order = Vec::<String>::new();
+        for path in std::mem::take(&mut self.order) {
+            let path = match moved(&path) {
+                Some(Some(new)) => new,
+                Some(None) => continue,
+                None => path,
+            };
+            if !order.contains(&path) {
+                order.push(path);
+            }
+        }
+        self.order = order;
         self.collapsed_spaces = rebase_set(&self.collapsed_spaces);
         self.collapsed_agents = rebase_set(&self.collapsed_agents);
         self.spaces = std::mem::take(&mut self.spaces)
@@ -335,8 +422,12 @@ pub(super) struct FolderRow {
     pub(super) collapsed: bool,
     /// Spaces or agents anywhere inside.
     pub(super) count: usize,
-    /// The most urgent agent state inside.
-    pub(super) status: AgentStatus,
+    /// How many of them wait for a person (blocked, done or idle) and how many
+    /// are working.
+    pub(super) waiting: usize,
+    pub(super) working: usize,
+    /// The most urgent state among the waiting ones: what colours their count.
+    pub(super) waiting_status: AgentStatus,
     /// An agent inside is marked TODO.
     pub(super) todo: bool,
 }
@@ -350,7 +441,73 @@ pub(super) enum SpacesRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum AgentListRow {
     Folder(FolderRow),
-    Agent { pane_id: String, depth: u16 },
+    Agent {
+        pane_id: String,
+        depth: u16,
+    },
+    /// The head of a group in the priority view.
+    Group {
+        group: AgentGroup,
+        count: usize,
+        /// The most urgent state in the group: what colours its head.
+        status: AgentStatus,
+    },
+}
+
+/// The groups of the priority view, in the order it shows them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum AgentGroup {
+    /// Blocked, done or idle: the agent waits for a person.
+    Waiting,
+    Working,
+    /// No state known: shells and agents not yet recognised.
+    Other,
+}
+
+impl AgentGroup {
+    pub(super) fn of(status: AgentStatus) -> Self {
+        match status {
+            AgentStatus::Blocked | AgentStatus::Done | AgentStatus::Idle => Self::Waiting,
+            AgentStatus::Working => Self::Working,
+            AgentStatus::Unknown => Self::Other,
+        }
+    }
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Working => "working",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// How soon an agent needs a person: blocked, then done, then idle, then
+/// working, then unknown.
+pub(super) fn attention_rank(status: AgentStatus) -> u8 {
+    match status {
+        AgentStatus::Blocked => 0,
+        AgentStatus::Done => 1,
+        AgentStatus::Idle => 2,
+        AgentStatus::Working => 3,
+        AgentStatus::Unknown => 4,
+    }
+}
+
+/// Folder siblings in the order arranged by hand, the rest after them by name.
+fn sort_siblings(siblings: &mut [String], order: &[String]) {
+    let rank = |path: &str| order.iter().position(|ordered| ordered == path);
+    siblings.sort_by(|left, right| match (rank(left), rank(right)) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => {
+            let (left, right) = (folder_name(left), folder_name(right));
+            left.to_lowercase()
+                .cmp(&right.to_lowercase())
+                .then_with(|| left.cmp(right))
+        }
+    });
 }
 
 enum TreeRow<T> {
@@ -369,7 +526,9 @@ struct TreeItem<T> {
 #[derive(Default)]
 struct FolderStats {
     count: usize,
-    status: Option<AgentStatus>,
+    waiting: usize,
+    working: usize,
+    waiting_status: Option<AgentStatus>,
     todo: bool,
     focused_item: Option<usize>,
 }
@@ -390,6 +549,7 @@ fn build_tree<T: Clone>(
     items: &[TreeItem<T>],
     extra_folders: BTreeSet<String>,
     collapsed: &BTreeSet<String>,
+    order: &[String],
     expand_all: bool,
 ) -> Vec<TreeRow<T>> {
     let mut shown = BTreeSet::new();
@@ -408,12 +568,7 @@ fn build_tree<T: Clone>(
             .push(path.clone());
     }
     for siblings in children.values_mut() {
-        siblings.sort_by(|left, right| {
-            let (left, right) = (folder_name(left), folder_name(right));
-            left.to_lowercase()
-                .cmp(&right.to_lowercase())
-                .then_with(|| left.cmp(right))
-        });
+        sort_siblings(siblings, order);
     }
     let mut by_folder = HashMap::<Option<String>, Vec<usize>>::new();
     let mut stats = HashMap::<String, FolderStats>::new();
@@ -430,11 +585,18 @@ fn build_tree<T: Clone>(
             let stat = stats.entry(path.to_owned()).or_default();
             stat.count += 1;
             stat.todo |= item.todo;
-            if stat
-                .status
-                .is_none_or(|status| status_priority(item.status) > status_priority(status))
-            {
-                stat.status = Some(item.status);
+            match AgentGroup::of(item.status) {
+                AgentGroup::Waiting => {
+                    stat.waiting += 1;
+                    if stat
+                        .waiting_status
+                        .is_none_or(|status| attention_rank(item.status) < attention_rank(status))
+                    {
+                        stat.waiting_status = Some(item.status);
+                    }
+                }
+                AgentGroup::Working => stat.working += 1,
+                AgentGroup::Other => {}
             }
             if item.focused {
                 stat.focused_item.get_or_insert(index);
@@ -468,9 +630,11 @@ fn walk_tree<T: Clone>(
             depth,
             collapsed,
             count: stats.map_or(0, |stats| stats.count),
-            status: stats
-                .and_then(|stats| stats.status)
-                .unwrap_or(AgentStatus::Unknown),
+            waiting: stats.map_or(0, |stats| stats.waiting),
+            working: stats.map_or(0, |stats| stats.working),
+            waiting_status: stats
+                .and_then(|stats| stats.waiting_status)
+                .unwrap_or(AgentStatus::Idle),
             todo: stats.is_some_and(|stats| stats.todo),
         }));
         if !collapsed {
@@ -551,6 +715,7 @@ pub(super) fn spaces_rows(
         &items,
         extra,
         folders.collapsed(FolderSection::Spaces),
+        &folders.order,
         filter.is_active(),
     )
     .into_iter()
@@ -654,6 +819,7 @@ pub(super) fn agent_list_rows(
         &items,
         extra,
         folders.collapsed(FolderSection::Agents),
+        &folders.order,
         filter.is_active(),
     )
     .into_iter()
@@ -683,9 +849,91 @@ pub(super) fn agent_order_in_folders(
         .into_iter()
         .filter_map(|row| match row {
             AgentListRow::Agent { pane_id, .. } => Some(pane_id),
-            AgentListRow::Folder(_) => None,
+            AgentListRow::Folder(_) | AgentListRow::Group { .. } => None,
         })
         .collect()
+}
+
+/// Every agent by how soon it needs a person: blocked, done, idle, working,
+/// unknown; the latest change first within each state.
+pub(super) fn priority_agent_order(snapshot: &ClientShellSnapshot) -> Vec<String> {
+    let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
+    agents.sort_by_key(|agent| {
+        (
+            attention_rank(agent.agent_status),
+            std::cmp::Reverse(agent.state_change_seq),
+        )
+    });
+    agents
+        .into_iter()
+        .map(|agent| agent.pane_id.clone())
+        .collect()
+}
+
+/// The agents list of a sidebar with folders: the folder tree (agents in
+/// their spaces' order inside each folder), or, sorted by priority, everyone
+/// in the groups waiting, working and other.
+pub(super) fn agent_panel_rows(
+    snapshot: &ClientShellSnapshot,
+    folders: &SidebarFolders,
+    by_priority: bool,
+    filter: &SidebarFilter,
+) -> Vec<AgentListRow> {
+    if !by_priority {
+        let order = super::agent_sidebar::ordered_agent_pane_ids(
+            snapshot,
+            crate::config::AgentPanelSortConfig::Spaces,
+        );
+        return agent_list_rows(snapshot, &order, folders, filter);
+    }
+    let agents = priority_agent_order(snapshot)
+        .into_iter()
+        .filter_map(|pane_id| {
+            let agent = snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.pane_id == pane_id)?;
+            let folder = folders.agent_folder(&agent.pane_id, &agent.workspace_id);
+            (!filter.is_active() || filter.matches(&agent_text(snapshot, agent, folder)))
+                .then_some((pane_id, agent.agent_status))
+        })
+        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    for (index, (pane_id, status)) in agents.iter().enumerate() {
+        let group = AgentGroup::of(*status);
+        if index == 0 || AgentGroup::of(agents[index - 1].1) != group {
+            rows.push(AgentListRow::Group {
+                group,
+                count: agents
+                    .iter()
+                    .filter(|(_, status)| AgentGroup::of(*status) == group)
+                    .count(),
+                status: *status,
+            });
+        }
+        rows.push(AgentListRow::Agent {
+            pane_id: pane_id.clone(),
+            depth: 0,
+        });
+    }
+    rows
+}
+
+/// Every agent in the order the agents list shows it, collapsed folders
+/// included: the order agent numbers and next/previous agent follow.
+pub(super) fn agent_panel_order(
+    snapshot: &ClientShellSnapshot,
+    folders: &SidebarFolders,
+    by_priority: bool,
+) -> Vec<String> {
+    if by_priority {
+        return priority_agent_order(snapshot);
+    }
+    let order = super::agent_sidebar::ordered_agent_pane_ids(
+        snapshot,
+        crate::config::AgentPanelSortConfig::Spaces,
+    );
+    agent_order_in_folders(snapshot, order, folders)
 }
 
 /// The first row of the worktree group a workspace belongs to: the row a
@@ -725,15 +973,32 @@ impl FolderChoice {
     }
 }
 
-/// Folders in tree order: each folder followed by its subfolders, by name.
-pub(super) fn folders_in_tree_order(paths: BTreeSet<String>) -> Vec<String> {
-    let mut paths = paths.into_iter().collect::<Vec<_>>();
-    paths.sort_by_key(|path| {
-        path.split('/')
-            .map(|level| (level.to_lowercase(), level.to_owned()))
-            .collect::<Vec<_>>()
-    });
-    paths
+/// Folders in tree order: each folder followed by its subfolders, siblings
+/// in the sidebar's order.
+pub(super) fn folders_in_tree_order(paths: BTreeSet<String>, order: &[String]) -> Vec<String> {
+    let mut children = HashMap::<Option<&str>, Vec<String>>::new();
+    for path in &paths {
+        children
+            .entry(folder_parent(path))
+            .or_default()
+            .push(path.clone());
+    }
+    for siblings in children.values_mut() {
+        sort_siblings(siblings, order);
+    }
+    fn walk(
+        children: &HashMap<Option<&str>, Vec<String>>,
+        parent: Option<&str>,
+        out: &mut Vec<String>,
+    ) {
+        for child in children.get(&parent).into_iter().flatten() {
+            out.push(child.clone());
+            walk(children, Some(child), out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&children, None, &mut out);
+    out
 }
 
 /// What the folder picker offers for the typed words: the top level and every
@@ -845,6 +1110,7 @@ mod tests {
             ["home", "ASOUP/THEX", "ASOUP", "ASOUP/core"]
                 .map(String::from)
                 .into(),
+            &[],
         );
         assert_eq!(folders, ["ASOUP", "ASOUP/core", "ASOUP/THEX", "home"]);
         assert_eq!(
@@ -877,6 +1143,36 @@ mod tests {
             selected_choice_index(&choices, Some(&FolderChoice::TopLevel)),
             0
         );
+    }
+
+    #[test]
+    fn folders_keep_the_order_arranged_by_hand() {
+        let mut folders = SidebarFolders::default();
+        for path in ["ASOUP", "ASOUP/THEX", "ASOUP/core", "home", "later"] {
+            folders.create(path);
+        }
+        assert_eq!(folders.sibling_folders(None), ["ASOUP", "home", "later"]);
+        assert!(folders.place_folder("later", "ASOUP", false));
+        assert_eq!(folders.sibling_folders(None), ["later", "ASOUP", "home"]);
+        assert!(folders.place_folder("later", "home", true));
+        assert_eq!(folders.sibling_folders(None), ["ASOUP", "home", "later"]);
+        assert!(folders.shift_folder("ASOUP/THEX", -1));
+        assert_eq!(
+            folders_in_tree_order(folders.all_paths(), &folders.order),
+            ["ASOUP", "ASOUP/THEX", "ASOUP/core", "home", "later"]
+        );
+        // A rename keeps the place; a move into another folder starts last.
+        assert!(folders.rename("home", "Home"));
+        assert_eq!(folders.sibling_folders(None), ["ASOUP", "Home", "later"]);
+        assert!(folders.move_folder_into("later", Some("ASOUP")));
+        assert_eq!(
+            folders.sibling_folders(Some("ASOUP")),
+            ["ASOUP/THEX", "ASOUP/core", "ASOUP/later"]
+        );
+        folders.delete("ASOUP/THEX");
+        assert!(!folders.order.iter().any(|path| path == "ASOUP/THEX"));
+        // Not siblings: nothing to arrange.
+        assert!(!folders.place_folder("Home", "ASOUP/core", false));
     }
 
     #[test]
@@ -924,7 +1220,13 @@ mod tests {
             item(Some("ASOUP/THEX"), "thex-b", false),
             item(Some("home"), "battery", false),
         ];
-        let rows = build_tree(&items, ["Empty".to_owned()].into(), &BTreeSet::new(), false);
+        let rows = build_tree(
+            &items,
+            ["Empty".to_owned()].into(),
+            &BTreeSet::new(),
+            &[],
+            false,
+        );
         assert_eq!(
             outline(&rows),
             [
@@ -949,10 +1251,10 @@ mod tests {
             item(Some("ASOUP"), "core", false),
         ];
         let collapsed = ["ASOUP".to_owned()].into();
-        let rows = build_tree(&items, BTreeSet::new(), &collapsed, false);
+        let rows = build_tree(&items, BTreeSet::new(), &collapsed, &[], false);
         assert_eq!(outline(&rows), ["+ASOUP (3)", "  thex-b"]);
 
-        let rows = build_tree(&items, BTreeSet::new(), &collapsed, true);
+        let rows = build_tree(&items, BTreeSet::new(), &collapsed, &[], true);
         assert_eq!(outline(&rows).len(), 5);
     }
 }

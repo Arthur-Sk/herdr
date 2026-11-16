@@ -56,6 +56,7 @@ pub(super) fn render_expanded(
         buffer,
         area,
         agent_view_label,
+        None,
         config,
         hits,
     ) {

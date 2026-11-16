@@ -128,12 +128,13 @@ pub(crate) fn render_collapsed_sidebar(
         detail_area.width,
         detail_area.height.saturating_sub(1),
     );
-    let agent_order = super::ordered_agent_pane_ids(snapshot, config.agent_panel_sort);
     let agent_order = match folders.filter(|_| snapshot.agent_view_label.is_none()) {
-        Some(folders) => {
-            super::super::folders::agent_order_in_folders(snapshot, agent_order, folders)
-        }
-        None => agent_order,
+        Some(folders) => super::super::folders::agent_panel_order(
+            snapshot,
+            folders,
+            config.agent_panel_sort == crate::config::AgentPanelSortConfig::Priority,
+        ),
+        None => super::ordered_agent_pane_ids(snapshot, config.agent_panel_sort),
     };
     for (index, pane_id) in agent_order
         .into_iter()

@@ -2180,19 +2180,7 @@ impl ClientShellState {
                     return;
                 }
                 if super::contains(self.hits.agent_sort_toggle, point) {
-                    let sort = match self.config.agent_panel_sort {
-                        crate::config::AgentPanelSortConfig::Spaces => {
-                            crate::config::AgentPanelSortConfig::Priority
-                        }
-                        crate::config::AgentPanelSortConfig::Priority => {
-                            crate::config::AgentPanelSortConfig::Spaces
-                        }
-                    };
-                    self.config.agent_panel_sort = sort;
-                    self.agent_panel_sort_manual = true;
-                    self.agent_scroll = 0;
-                    self.persist_chrome_preferences(outcome);
-                    outcome.repaint = true;
+                    self.toggle_agent_view(outcome);
                     return;
                 }
                 if self.handle_endpoint_machine_click(point, outcome) {
@@ -2250,6 +2238,7 @@ impl ClientShellState {
                         self.open_sidebar_filter();
                     } else {
                         self.sidebar_filter.clear();
+                        self.persist_chrome_preferences(outcome);
                     }
                     outcome.repaint = true;
                     return;

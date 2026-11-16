@@ -99,10 +99,16 @@ pub(super) fn ordered_agent_pane_ids(
         .collect()
 }
 
-/// One row of the agents list: a folder, or an agent at a folder depth.
+/// One row of the agents list: a folder, an agent at a folder depth, or the
+/// head of a priority group.
 enum AgentPanelRow {
     Folder(super::folders::FolderRow),
     Agent(AgentRow, u16),
+    Group {
+        group: super::folders::AgentGroup,
+        count: usize,
+        status: crate::api::schema::AgentStatus,
+    },
 }
 
 pub(super) fn render_agent_panel(
@@ -114,17 +120,20 @@ pub(super) fn render_agent_panel(
     view: &super::render::SidebarFolderView<'_>,
     hits: &mut ShellHitMap,
 ) {
+    // A server-side agent view keeps its own order and stays flat.
+    let folders = view.folders.filter(|_| snapshot.agent_view_label.is_none());
+    let by_priority = config.agent_panel_sort == crate::config::AgentPanelSortConfig::Priority;
+    let view_label = folders.map(|_| if by_priority { "priority" } else { "folders" });
     if !render_agent_panel_header(
         buffer,
         area,
         snapshot.agent_view_label.as_deref(),
+        view_label,
         config,
         hits,
     ) {
         return;
     }
-    // A server-side agent view keeps its own order and stays flat.
-    let folders = view.folders.filter(|_| snapshot.agent_view_label.is_none());
     if folders.is_some() {
         hits.agents_header = Rect::new(area.x, area.y + 1, area.width, 1);
         if view.drop_top_level {
@@ -139,8 +148,7 @@ pub(super) fn render_agent_panel(
 
     let rows = match folders {
         Some(folders) => {
-            let order = ordered_agent_pane_ids(snapshot, config.agent_panel_sort);
-            super::folders::agent_list_rows(snapshot, &order, folders, &view.filter)
+            super::folders::agent_panel_rows(snapshot, folders, by_priority, &view.filter)
                 .into_iter()
                 .filter_map(|row| match row {
                     super::folders::AgentListRow::Folder(folder) => {
@@ -150,6 +158,15 @@ pub(super) fn render_agent_panel(
                         agent_row(snapshot, &pane_id, config, None)
                             .map(|row| AgentPanelRow::Agent(row, depth))
                     }
+                    super::folders::AgentListRow::Group {
+                        group,
+                        count,
+                        status,
+                    } => Some(AgentPanelRow::Group {
+                        group,
+                        count,
+                        status,
+                    }),
                 })
                 .collect::<Vec<_>>()
         }
@@ -157,6 +174,14 @@ pub(super) fn render_agent_panel(
             .into_iter()
             .map(|row| AgentPanelRow::Agent(row, 0))
             .collect(),
+    };
+    // A list too short for them keeps every line for the agents.
+    let rows = if area.height < 8 {
+        rows.into_iter()
+            .filter(|row| !matches!(row, AgentPanelRow::Group { .. }))
+            .collect()
+    } else {
+        rows
     };
     let empty_message = (snapshot.agent_view_label.is_some() || view.filter.is_active())
         .then_some(" no matching agents");
@@ -169,7 +194,7 @@ pub(super) fn render_agent_panel(
         agent_scroll,
         hits,
         |row| match row {
-            AgentPanelRow::Folder(_) => 1,
+            AgentPanelRow::Folder(_) | AgentPanelRow::Group { .. } => 1,
             AgentPanelRow::Agent(row, _) => row.rows.len(),
         },
         |buffer, rect, row, hits| match row {
@@ -186,7 +211,49 @@ pub(super) fn render_agent_panel(
                 let dragged = view.dragged_agent == Some(row.pane_id.as_str());
                 render_agent_row_at(buffer, rect, row, *depth, dragged, config);
             }
+            AgentPanelRow::Group {
+                group,
+                count,
+                status,
+            } => render_group_row(buffer, rect, *group, *count, *status, config),
         },
+    );
+}
+
+/// The head of a priority group: "● waiting 5", coloured by its most urgent
+/// state, with a rule to the edge.
+fn render_group_row(
+    buffer: &mut Buffer,
+    rect: Rect,
+    group: super::folders::AgentGroup,
+    count: usize,
+    status: crate::api::schema::AgentStatus,
+    config: &ClientShellConfig,
+) {
+    let palette = &config.palette;
+    let color = status_color(status, palette);
+    let label = format!(
+        " {} {} {count} ",
+        status_icon(status, config.status_indicators),
+        group.label()
+    );
+    let width = display_width(&label).min(rect.width as usize) as u16;
+    put_text(
+        buffer,
+        rect.x,
+        rect.y,
+        width,
+        &label,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    );
+    let rule = rect.width.saturating_sub(width + 1);
+    put_text(
+        buffer,
+        rect.x + width,
+        rect.y,
+        rule,
+        &"─".repeat(rule as usize),
+        Style::default().fg(palette.surface_dim),
     );
 }
 
@@ -216,11 +283,27 @@ pub(super) fn render_folder_row(
         .saturating_mul(2)
         .saturating_add(1)
         .min(rect.width.saturating_sub(4));
+    // What waits and what works inside, so a folder shows it even collapsed.
     let mut right = Vec::<(String, Style)>::new();
-    if folder.collapsed && folder.count > 0 {
+    if folder.waiting > 0 {
         right.push((
-            status_icon(folder.status, config.status_indicators).to_owned(),
-            Style::default().fg(status_color(folder.status, palette)),
+            format!(
+                "{}{}",
+                status_icon(folder.waiting_status, config.status_indicators),
+                folder.waiting
+            ),
+            Style::default().fg(status_color(folder.waiting_status, palette)),
+        ));
+    }
+    if folder.working > 0 {
+        let working = crate::api::schema::AgentStatus::Working;
+        right.push((
+            format!(
+                "{}{}",
+                status_icon(working, config.status_indicators),
+                folder.working
+            ),
+            Style::default().fg(status_color(working, palette)),
         ));
     }
     if folder.count > 0 {
@@ -287,6 +370,7 @@ pub(super) fn render_agent_panel_header(
     buffer: &mut Buffer,
     area: Rect,
     agent_view_label: Option<&str>,
+    folder_view_label: Option<&str>,
     config: &ClientShellConfig,
     hits: &mut ShellHitMap,
 ) -> bool {
@@ -314,10 +398,13 @@ pub(super) fn render_agent_panel_header(
             .fg(config.palette.overlay0)
             .add_modifier(Modifier::BOLD),
     );
-    let sort_label = agent_view_label.unwrap_or(match config.agent_panel_sort {
-        crate::config::AgentPanelSortConfig::Spaces => "grouped",
-        crate::config::AgentPanelSortConfig::Priority => "priority",
-    });
+    let sort_label =
+        agent_view_label
+            .or(folder_view_label)
+            .unwrap_or(match config.agent_panel_sort {
+                crate::config::AgentPanelSortConfig::Spaces => "grouped",
+                crate::config::AgentPanelSortConfig::Priority => "priority",
+            });
     let sort_width = display_width(sort_label).min(area.width as usize) as u16;
     let sort_rect = Rect::new(
         area.right().saturating_sub(sort_width),

@@ -109,17 +109,35 @@ impl ClientContextMenuOverlay {
             }
             ClientContextMenuTarget::Folder { .. } => vec![
                 item("New subfolder...", Action::NewFolder),
-                item("Rename / move...", Action::RenameFolder),
+                item("Move up", Action::MoveFolderUp),
+                item("Move down", Action::MoveFolderDown),
+                item("Move to folder...", Action::MoveToFolder),
+                item("Rename...", Action::RenameFolder),
                 item("Delete folder", Action::DeleteFolder),
                 item("Show only this folder", Action::ShowOnlyFolder),
                 item("Expand all", Action::ExpandAllFolders),
                 item("Collapse all", Action::CollapseAllFolders),
             ],
-            ClientContextMenuTarget::SidebarSection { section, filtered } => {
-                let mut items = vec![
+            ClientContextMenuTarget::SidebarSection {
+                section,
+                filtered,
+                agents_by_priority,
+            } => {
+                let mut items = Vec::new();
+                if *section == super::folders::FolderSection::Agents {
+                    items.push(item(
+                        if *agents_by_priority {
+                            "Show folders"
+                        } else {
+                            "Show by priority"
+                        },
+                        Action::ToggleAgentView,
+                    ));
+                }
+                items.extend([
                     item("New folder...", Action::NewFolder),
                     item("Filter...", Action::FilterSidebar),
-                ];
+                ]);
                 if *filtered {
                     items.push(item(
                         match section {
@@ -306,6 +324,7 @@ impl ClientShellState {
             target: ClientContextMenuTarget::SidebarSection {
                 section,
                 filtered: !self.sidebar_filter.trim().is_empty(),
+                agents_by_priority: self.agents_by_priority(),
             },
             x,
             y,

@@ -86,9 +86,12 @@ impl ClientShellState {
         if !self.sidebar_has_folders() || snapshot.agent_view_label.is_some() {
             return None;
         }
-        let order =
-            super::agent_sidebar::ordered_agent_pane_ids(snapshot, self.config.agent_panel_sort);
-        folders::agent_list_rows(snapshot, &order, &self.folders, &self.active_sidebar_filter())
+        folders::agent_panel_rows(
+            snapshot,
+            &self.folders,
+            self.agents_by_priority(),
+            &self.active_sidebar_filter(),
+        )
             .iter()
             .position(|row| {
                 matches!(row, folders::AgentListRow::Agent { pane_id: candidate, .. } if candidate == pane_id)
@@ -97,12 +100,13 @@ impl ClientShellState {
 
     /// Agents in folder order: what agent numbers and next/previous agent use.
     pub(super) fn sidebar_agent_order(&self, snapshot: &ClientShellSnapshot) -> Vec<String> {
-        let order =
-            super::agent_sidebar::ordered_agent_pane_ids(snapshot, self.config.agent_panel_sort);
         if !self.sidebar_has_folders() || snapshot.agent_view_label.is_some() {
-            return order;
+            return super::agent_sidebar::ordered_agent_pane_ids(
+                snapshot,
+                self.config.agent_panel_sort,
+            );
         }
-        folders::agent_order_in_folders(snapshot, order, &self.folders)
+        folders::agent_panel_order(snapshot, &self.folders, self.agents_by_priority())
     }
 
     pub(super) fn open_move_to_folder(&mut self, item: FolderItem) {
@@ -119,7 +123,13 @@ impl ClientShellState {
                 .agent_folder(pane_id, workspace_id)
                 .map(str::to_owned),
             FolderItem::Shown(_) => None,
+            FolderItem::Folder { path } => folders::folder_parent(path).map(str::to_owned),
         };
+        let mut choices =
+            folders::folders_in_tree_order(self.folders.all_paths(), &self.folders.order);
+        if let FolderItem::Folder { path } = &item {
+            choices.retain(|candidate| !folders::folder_contains(path, candidate));
+        }
         let label = self.folder_item_label(&item);
         let selected = Some(match &current {
             Some(path) => FolderChoice::Folder(path.clone()),
@@ -131,7 +141,7 @@ impl ClientShellState {
             target: ClientRenameTarget::MoveToFolder {
                 item,
                 label,
-                folders: folders::folders_in_tree_order(self.folders.all_paths()),
+                folders: choices,
                 current,
                 selected,
             },
@@ -164,6 +174,9 @@ impl ClientShellState {
                     (FolderSection::Agents, _) => "agents",
                 };
                 return format!("{count} shown {noun}");
+            }
+            FolderItem::Folder { path } => {
+                return format!("▸ {}", cut_label(folders::folder_name(path), 36));
             }
         };
         format!("«{}»", cut_label(&text, 36))
@@ -254,12 +267,17 @@ impl ClientShellState {
                 (what, target.as_ref().map(drop_target_text))
             }
             ClientChromeDrag::Folder { path, target } => (
-                format!("▸ {}", folders::folder_name(path)),
+                format!("▸ {}", cut_label(folders::folder_name(path), 24)),
                 target.as_ref().map(|target| match target {
-                    FolderDropTarget::Folder(parent) => {
-                        format!("▸ {parent}/{}", folders::folder_name(path))
+                    FolderMove::Into(FolderDropTarget::Folder(parent)) => {
+                        format!("into ▸ {parent}")
                     }
-                    FolderDropTarget::TopLevel => "⌂ top level".to_owned(),
+                    FolderMove::Into(FolderDropTarget::TopLevel) => "⌂ top level".to_owned(),
+                    FolderMove::Beside { sibling, after } => format!(
+                        "{} ▸ {}",
+                        if *after { "after" } else { "before" },
+                        folders::folder_name(sibling)
+                    ),
                 }),
             ),
             _ => return None,
@@ -305,6 +323,9 @@ impl ClientShellState {
                     self.file_item(&item, folder);
                 }
             }
+            FolderItem::Folder { path } => {
+                self.folders.move_folder_into(path, folder);
+            }
         }
     }
 
@@ -328,26 +349,25 @@ impl ClientShellState {
                 workspace_id: workspace.workspace_id.clone(),
             })
             .collect(),
-            FolderSection::Agents => {
-                let order = super::agent_sidebar::ordered_agent_pane_ids(
-                    snapshot,
-                    self.config.agent_panel_sort,
-                );
-                folders::agent_list_rows(snapshot, &order, &self.folders, &filter)
-                    .into_iter()
-                    .filter_map(|row| match row {
-                        folders::AgentListRow::Agent { pane_id, .. } => snapshot
-                            .agents
-                            .iter()
-                            .find(|agent| agent.pane_id == pane_id)
-                            .map(|agent| FolderItem::Agent {
-                                pane_id,
-                                workspace_id: agent.workspace_id.clone(),
-                            }),
-                        folders::AgentListRow::Folder(_) => None,
-                    })
-                    .collect()
-            }
+            FolderSection::Agents => folders::agent_panel_rows(
+                snapshot,
+                &self.folders,
+                self.agents_by_priority(),
+                &filter,
+            )
+            .into_iter()
+            .filter_map(|row| match row {
+                folders::AgentListRow::Agent { pane_id, .. } => snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.pane_id == pane_id)
+                    .map(|agent| FolderItem::Agent {
+                        pane_id,
+                        workspace_id: agent.workspace_id.clone(),
+                    }),
+                folders::AgentListRow::Folder(_) | folders::AgentListRow::Group { .. } => None,
+            })
+            .collect(),
         }
     }
 
@@ -401,7 +421,6 @@ impl ClientShellState {
                 self.sidebar_filter = text.trim().to_owned();
                 self.workspace_scroll = 0;
                 self.agent_scroll = 0;
-                return true;
             }
             _ => return false,
         }
@@ -459,13 +478,33 @@ impl ClientShellState {
                     self.sidebar_filter = path;
                     self.workspace_scroll = 0;
                     self.agent_scroll = 0;
+                    self.persist_chrome_preferences(outcome);
                 }
             }
+            ClientContextMenuAction::MoveFolderUp | ClientContextMenuAction::MoveFolderDown => {
+                let delta = if action == ClientContextMenuAction::MoveFolderUp {
+                    -1
+                } else {
+                    1
+                };
+                if path.is_some_and(|path| self.folders.shift_folder(&path, delta)) {
+                    self.persist_chrome_preferences(outcome);
+                }
+            }
+            ClientContextMenuAction::MoveToFolder => {
+                if let Some(path) = path {
+                    self.open_move_to_folder(FolderItem::Folder { path });
+                }
+            }
+            ClientContextMenuAction::ToggleAgentView => self.toggle_agent_view(outcome),
             ClientContextMenuAction::FilterSidebar => self.open_sidebar_filter(),
             ClientContextMenuAction::MoveShownToFolder => {
                 self.open_move_to_folder(FolderItem::Shown(section))
             }
-            ClientContextMenuAction::ClearSidebarFilter => self.sidebar_filter.clear(),
+            ClientContextMenuAction::ClearSidebarFilter => {
+                self.sidebar_filter.clear();
+                self.persist_chrome_preferences(outcome);
+            }
             ClientContextMenuAction::ExpandAllFolders
             | ClientContextMenuAction::CollapseAllFolders => {
                 self.folders.set_all_collapsed(
@@ -476,6 +515,26 @@ impl ClientShellState {
             }
             _ => {}
         }
+        outcome.repaint = true;
+    }
+
+    /// The agents list sorted by priority: with folders, the view of waiting,
+    /// working and other agents in place of the folder tree.
+    pub(super) fn agents_by_priority(&self) -> bool {
+        self.config.agent_panel_sort == crate::config::AgentPanelSortConfig::Priority
+    }
+
+    /// Switches the agents list between its two views: folders (or grouped by
+    /// space without folders) and priority. Kept in the chrome preferences.
+    pub(super) fn toggle_agent_view(&mut self, outcome: &mut ClientShellInput) {
+        self.config.agent_panel_sort = if self.agents_by_priority() {
+            crate::config::AgentPanelSortConfig::Spaces
+        } else {
+            crate::config::AgentPanelSortConfig::Priority
+        };
+        self.agent_panel_sort_manual = true;
+        self.agent_scroll = 0;
+        self.persist_chrome_preferences(outcome);
         outcome.repaint = true;
     }
 
@@ -531,13 +590,36 @@ impl ClientShellState {
         .then_some(FolderDropTarget::TopLevel)
     }
 
-    /// Where a dragged folder would land; None where it cannot go (into
+    /// Where a dragged folder would land: beside a sibling folder row (before
+    /// it from below, after it from above), into any other folder, or into the
+    /// folder of the row under the pointer. None where it cannot go (into
     /// itself) or would not move.
     pub(super) fn folder_drag_target_at(
         &self,
         path: &str,
         point: (u16, u16),
-    ) -> Option<FolderDropTarget> {
+    ) -> Option<FolderMove> {
+        if let Some(hit) = self.folder_hit_at(point) {
+            let target = hit.path.as_str();
+            if folders::folder_contains(path, target) {
+                return None;
+            }
+            let parent = folders::folder_parent(path);
+            if folders::folder_parent(target) == parent {
+                let siblings = self.folders.sibling_folders(parent);
+                let position = |path: &str| siblings.iter().position(|sibling| sibling == path);
+                let after = position(path) < position(target);
+                return Some(FolderMove::Beside {
+                    sibling: target.to_owned(),
+                    after,
+                });
+            }
+        }
+        self.folder_into_target_at(path, point)
+            .map(FolderMove::Into)
+    }
+
+    fn folder_into_target_at(&self, path: &str, point: (u16, u16)) -> Option<FolderDropTarget> {
         match self.sidebar_folder_target_at(point)? {
             FolderDropTarget::Folder(target)
                 if folders::folder_contains(path, &target)
@@ -677,15 +759,21 @@ impl ClientShellState {
     pub(super) fn drop_folder(
         &mut self,
         path: &str,
-        target: FolderDropTarget,
+        target: FolderMove,
         outcome: &mut ClientShellInput,
     ) {
-        let name = folders::folder_name(path);
-        let new_path = match target {
-            FolderDropTarget::Folder(parent) => format!("{parent}/{name}"),
-            FolderDropTarget::TopLevel => name.to_owned(),
+        let moved = match target {
+            FolderMove::Into(FolderDropTarget::Folder(parent)) => {
+                self.folders.move_folder_into(path, Some(&parent))
+            }
+            FolderMove::Into(FolderDropTarget::TopLevel) => {
+                self.folders.move_folder_into(path, None)
+            }
+            FolderMove::Beside { sibling, after } => {
+                self.folders.place_folder(path, &sibling, after)
+            }
         };
-        if self.folders.rename(path, &new_path) {
+        if moved {
             self.persist_chrome_preferences(outcome);
         }
     }
