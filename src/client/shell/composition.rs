@@ -54,6 +54,9 @@ impl ClientShellState {
                 && self.endpoint_status(&self.active_endpoint_id)
                     == Some(ClientEndpointStatus::Online)
         });
+        let has_folders = self.sidebar_has_folders();
+        let sidebar_filter = self.active_sidebar_filter();
+        let sidebar_filter_text = self.active_sidebar_filter_text().to_owned();
         let mut render_state = render::ShellRenderState {
             machine_diagnostics: &self.machine_diagnostics,
             endpoints: &self.endpoints,
@@ -77,6 +80,12 @@ impl ClientShellState {
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
+            folder_view: render::sidebar_folder_view(
+                has_folders.then_some(&self.folders),
+                sidebar_filter,
+                &sidebar_filter_text,
+                None,
+            ),
         };
         if let Some(snapshot) = local_snapshot {
             render::render_sidebar(
@@ -200,10 +209,16 @@ impl ClientShellState {
                 target,
             }) => (
                 Some(source_workspace_id.as_str()),
-                target.as_ref().map(|(_, row)| *row),
+                target.as_ref().and_then(|target| match target {
+                    WorkspaceDropTarget::Slot { row, .. } => Some(*row),
+                    WorkspaceDropTarget::Folder(_) => None,
+                }),
             ),
             _ => (None, None),
         };
+        let has_folders = self.sidebar_has_folders();
+        let sidebar_filter = self.active_sidebar_filter();
+        let sidebar_filter_text = self.active_sidebar_filter_text().to_owned();
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
         self.hits = render::render_shell(
             &mut buffer,
@@ -233,6 +248,12 @@ impl ClientShellState {
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
+                folder_view: render::sidebar_folder_view(
+                    has_folders.then_some(&self.folders),
+                    sidebar_filter,
+                    &sidebar_filter_text,
+                    self.chrome_drag.as_ref(),
+                ),
             },
         );
         self.hits.panes = surface

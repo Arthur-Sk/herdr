@@ -99,12 +99,19 @@ pub(super) fn ordered_agent_pane_ids(
         .collect()
 }
 
+/// One row of the agents list: a folder, or an agent at a folder depth.
+enum AgentPanelRow {
+    Folder(super::folders::FolderRow),
+    Agent(AgentRow, u16),
+}
+
 pub(super) fn render_agent_panel(
     buffer: &mut Buffer,
     area: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
+    view: &super::render::SidebarFolderView<'_>,
     hits: &mut ShellHitMap,
 ) {
     if !render_agent_panel_header(
@@ -116,25 +123,164 @@ pub(super) fn render_agent_panel(
     ) {
         return;
     }
+    // A server-side agent view keeps its own order and stays flat.
+    let folders = view.folders.filter(|_| snapshot.agent_view_label.is_none());
+    if folders.is_some() {
+        hits.agents_header = Rect::new(area.x, area.y + 1, area.width, 1);
+        if view.drop_top_level {
+            buffer.set_style(
+                hits.agents_header,
+                Style::default()
+                    .bg(config.palette.surface1)
+                    .fg(config.palette.accent),
+            );
+        }
+    }
 
-    let rows = agent_rows(snapshot, config, None);
+    let rows = match folders {
+        Some(folders) => {
+            let order = ordered_agent_pane_ids(snapshot, config.agent_panel_sort);
+            super::folders::agent_list_rows(snapshot, &order, folders, &view.filter)
+                .into_iter()
+                .filter_map(|row| match row {
+                    super::folders::AgentListRow::Folder(folder) => {
+                        Some(AgentPanelRow::Folder(folder))
+                    }
+                    super::folders::AgentListRow::Agent { pane_id, depth } => {
+                        agent_row(snapshot, &pane_id, config, None)
+                            .map(|row| AgentPanelRow::Agent(row, depth))
+                    }
+                })
+                .collect::<Vec<_>>()
+        }
+        None => agent_rows(snapshot, config, None)
+            .into_iter()
+            .map(|row| AgentPanelRow::Agent(row, 0))
+            .collect(),
+    };
+    let empty_message = (snapshot.agent_view_label.is_some() || view.filter.is_active())
+        .then_some(" no matching agents");
     render_agent_list(
         buffer,
         area,
         &rows,
-        snapshot
-            .agent_view_label
-            .as_ref()
-            .map(|_| " no matching agents"),
+        empty_message,
         config,
         agent_scroll,
         hits,
-        |row| row.rows.len(),
-        |buffer, rect, row, hits| {
-            hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config);
+        |row| match row {
+            AgentPanelRow::Folder(_) => 1,
+            AgentPanelRow::Agent(row, _) => row.rows.len(),
+        },
+        |buffer, rect, row, hits| match row {
+            AgentPanelRow::Folder(folder) => {
+                render_folder_row(buffer, rect, folder, view, config);
+                hits.folders.push(FolderHit {
+                    rect,
+                    section: super::folders::FolderSection::Agents,
+                    path: folder.path.clone(),
+                });
+            }
+            AgentPanelRow::Agent(row, depth) => {
+                hits.agents.push((rect, row.pane_id.clone()));
+                let dragged = view.dragged_agent == Some(row.pane_id.as_str());
+                render_agent_row_at(buffer, rect, row, *depth, dragged, config);
+            }
         },
     );
+}
+
+/// A folder row: ▾/▸, the folder's name, and on the right how many spaces or
+/// agents it holds; a collapsed folder also shows the most urgent state inside
+/// and a TODO mark when an agent inside has one.
+pub(super) fn render_folder_row(
+    buffer: &mut Buffer,
+    rect: Rect,
+    folder: &super::folders::FolderRow,
+    view: &super::render::SidebarFolderView<'_>,
+    config: &ClientShellConfig,
+) {
+    let palette = &config.palette;
+    if rect.is_empty() {
+        return;
+    }
+    let drop_target = view.drop_folder == Some(folder.path.as_str());
+    let dragged = view.dragged_folder == Some(folder.path.as_str());
+    if drop_target {
+        buffer.set_style(rect, Style::default().bg(palette.surface1));
+    } else if dragged {
+        buffer.set_style(rect, Style::default().bg(palette.surface0));
+    }
+    let indent = folder
+        .depth
+        .saturating_mul(2)
+        .saturating_add(1)
+        .min(rect.width.saturating_sub(4));
+    let mut right = Vec::<(String, Style)>::new();
+    if folder.collapsed && folder.count > 0 {
+        right.push((
+            status_icon(folder.status, config.status_indicators).to_owned(),
+            Style::default().fg(status_color(folder.status, palette)),
+        ));
+    }
+    if folder.count > 0 {
+        right.push((
+            folder.count.to_string(),
+            Style::default().fg(palette.overlay0),
+        ));
+    }
+    let right_width = right
+        .iter()
+        .map(|(text, _)| display_width(text) + 1)
+        .sum::<usize>() as u16;
+    let name_style = Style::default()
+        .fg(if drop_target {
+            palette.text
+        } else {
+            palette.accent
+        })
+        .add_modifier(Modifier::BOLD);
+    let x = rect.x + indent;
+    put_text(
+        buffer,
+        x,
+        rect.y,
+        2,
+        if folder.collapsed { "▸ " } else { "▾ " },
+        name_style,
+    );
+    let name_width = rect
+        .right()
+        .saturating_sub(x + 2)
+        .saturating_sub(right_width + 1);
+    put_text(
+        buffer,
+        x + 2,
+        rect.y,
+        name_width,
+        super::folders::folder_name(&folder.path),
+        name_style,
+    );
+    if right_width + 6 <= rect.width {
+        let mut right_x = rect.right().saturating_sub(right_width);
+        for (text, style) in right {
+            let width = display_width(&text) as u16;
+            put_text(buffer, right_x, rect.y, width, &text, style);
+            right_x += width + 1;
+        }
+    }
+    if folder.collapsed && folder.todo {
+        put_text(
+            buffer,
+            rect.x,
+            rect.y,
+            1,
+            "▌",
+            Style::default()
+                .fg(palette.mauve)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
 }
 
 pub(super) fn render_agent_panel_header(
@@ -375,8 +521,23 @@ pub(super) fn render_agent_row(
     row: &AgentRow,
     config: &ClientShellConfig,
 ) {
+    render_agent_row_at(buffer, rect, row, 0, false, config);
+}
+
+/// An agent row indented to its folder depth.
+pub(super) fn render_agent_row_at(
+    buffer: &mut Buffer,
+    rect: Rect,
+    row: &AgentRow,
+    depth: u16,
+    dragged: bool,
+    config: &ClientShellConfig,
+) {
     let palette = &config.palette;
-    let row_style = if row.todo.is_some() {
+    let depth_indent = (depth as usize * 2).min((rect.width as usize).saturating_sub(8));
+    let row_style = if dragged {
+        Style::default().bg(palette.surface1)
+    } else if row.todo.is_some() {
         Style::default().bg(todo_row_bg(palette, row.focused))
     } else if row.focused {
         Style::default().bg(palette.active_row_bg)
@@ -413,7 +574,7 @@ pub(super) fn render_agent_row(
         .and_then(|todo| todo.reminder.as_deref())
         .map(|reminder| format!("◷ {reminder} "));
     for (index, tokens) in rows.iter().take(line_count).enumerate() {
-        let indent = if index == 0 { 1 } else { 3 };
+        let indent = depth_indent + if index == 0 { 1 } else { 3 };
         // The reminder sits at the right end of the last line.
         let badge = reminder
             .as_deref()

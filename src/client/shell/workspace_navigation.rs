@@ -126,7 +126,7 @@ impl ClientShellState {
                     self.collapsed_groups_for_endpoint(&endpoint.endpoint_id)
                         .unwrap_or(&empty_collapsed_groups)
                 };
-                render::workspace_entries(snapshot, collapsed_groups)
+                self.sidebar_space_entries(snapshot, collapsed_groups)
             };
             for entry in entries {
                 targets.push(WorkspaceNavigationTarget {

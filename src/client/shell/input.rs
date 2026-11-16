@@ -795,6 +795,11 @@ impl ClientShellState {
             self.accept_navigate_workspace(outcome);
             return;
         }
+        if code == KeyCode::Char('/') && modifiers.is_empty() && self.sidebar_has_folders() {
+            self.cancel_navigate(outcome);
+            self.open_sidebar_filter();
+            return;
+        }
         if self.workspace_preview_action_blocked() {
             // Bindings cannot run against a foreign preview, so Ctrl+[ has
             // nothing to lose to and cancels here the same way Esc does.

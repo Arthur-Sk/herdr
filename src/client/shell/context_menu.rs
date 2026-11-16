@@ -8,6 +8,17 @@ impl ClientContextMenuOverlay {
         use ClientContextMenuAction as Action;
 
         let item = |label, action| ClientContextMenuItem { label, action };
+        let mut items = self.base_items();
+        if let ClientContextMenuTarget::Workspace { folders: true, .. } = &self.target {
+            items.push(item("Move to folder...", Action::MoveToFolder));
+        }
+        items
+    }
+
+    fn base_items(&self) -> Vec<ClientContextMenuItem> {
+        use ClientContextMenuAction as Action;
+
+        let item = |label, action| ClientContextMenuItem { label, action };
         match &self.target {
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
@@ -86,7 +97,49 @@ impl ClientContextMenuOverlay {
                 ]);
                 items
             }
-            ClientContextMenuTarget::Agent { todo, .. } => todo_items(*todo),
+            ClientContextMenuTarget::Agent {
+                todo, filed_apart, ..
+            } => {
+                let mut items = todo.map(todo_items).unwrap_or_default();
+                items.push(item("Move to folder...", Action::MoveToFolder));
+                if *filed_apart {
+                    items.push(item("Follow its space's folder", Action::FollowSpaceFolder));
+                }
+                items
+            }
+            ClientContextMenuTarget::Folder { .. } => vec![
+                item("New subfolder...", Action::NewFolder),
+                item("Rename / move...", Action::RenameFolder),
+                item("Delete folder", Action::DeleteFolder),
+                item("Show only this folder", Action::ShowOnlyFolder),
+                item("Expand all", Action::ExpandAllFolders),
+                item("Collapse all", Action::CollapseAllFolders),
+            ],
+            ClientContextMenuTarget::SidebarSection { section, filtered } => {
+                let mut items = vec![
+                    item("New folder...", Action::NewFolder),
+                    item("Filter...", Action::FilterSidebar),
+                ];
+                if *filtered {
+                    items.push(item(
+                        match section {
+                            super::folders::FolderSection::Spaces => {
+                                "Move shown spaces to folder..."
+                            }
+                            super::folders::FolderSection::Agents => {
+                                "Move shown agents to folder..."
+                            }
+                        },
+                        Action::MoveShownToFolder,
+                    ));
+                    items.push(item("Clear filter", Action::ClearSidebarFilter));
+                }
+                items.extend([
+                    item("Expand all", Action::ExpandAllFolders),
+                    item("Collapse all", Action::CollapseAllFolders),
+                ]);
+                items
+            }
         }
     }
 }
@@ -142,6 +195,7 @@ impl ClientShellState {
                 has_worktree_children,
                 close_group,
                 collapsed,
+                folders: self.sidebar_has_folders(),
             },
             x,
             y,
@@ -195,19 +249,68 @@ impl ClientShellState {
         }));
     }
 
-    /// Opens the TODO menu of an agent row. Returns false when the active server
-    /// does not offer TODO marks, so the click falls through.
+    /// Opens the menu of an agent row: its TODO mark when the server offers
+    /// one, and its folder. Returns false when there is nothing to offer, so
+    /// the click falls through.
     pub(super) fn open_agent_context_menu(&mut self, pane_id: String, x: u16, y: u16) -> bool {
-        let Some(todo) = self.pane_todo_menu(&pane_id) else {
+        let todo = self.pane_todo_menu(&pane_id);
+        let workspace_id = self.snapshot.as_deref().and_then(|snapshot| {
+            snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.pane_id == pane_id)
+                .map(|agent| agent.workspace_id.clone())
+        });
+        let (Some(workspace_id), true) =
+            (workspace_id, todo.is_some() || self.sidebar_has_folders())
+        else {
             return false;
         };
+        let filed_apart = self.folders.agent_filed_apart(&pane_id);
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
-            target: ClientContextMenuTarget::Agent { pane_id, todo },
+            target: ClientContextMenuTarget::Agent {
+                pane_id,
+                workspace_id,
+                todo,
+                filed_apart,
+            },
             x,
             y,
             highlighted: 0,
         }));
         true
+    }
+
+    pub(super) fn open_folder_context_menu(
+        &mut self,
+        section: super::folders::FolderSection,
+        path: String,
+        x: u16,
+        y: u16,
+    ) {
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Folder { section, path },
+            x,
+            y,
+            highlighted: 0,
+        }));
+    }
+
+    pub(super) fn open_sidebar_section_context_menu(
+        &mut self,
+        section: super::folders::FolderSection,
+        x: u16,
+        y: u16,
+    ) {
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::SidebarSection {
+                section,
+                filtered: !self.sidebar_filter.trim().is_empty(),
+            },
+            x,
+            y,
+            highlighted: 0,
+        }));
     }
 
     fn pane_todo_menu(&self, pane_id: &str) -> Option<PaneTodoMenu> {
@@ -258,11 +361,41 @@ impl ClientShellState {
             return;
         };
         match menu.target {
+            ClientContextMenuTarget::Workspace { workspace_id, .. }
+                if action == ClientContextMenuAction::MoveToFolder =>
+            {
+                self.open_move_to_folder(FolderItem::Space { workspace_id })
+            }
             ClientContextMenuTarget::Workspace {
                 workspace_id,
                 close_group,
                 ..
             } => self.activate_workspace_context_action(workspace_id, close_group, action, outcome),
+            ClientContextMenuTarget::Agent {
+                pane_id,
+                workspace_id,
+                ..
+            } if matches!(
+                action,
+                ClientContextMenuAction::MoveToFolder | ClientContextMenuAction::FollowSpaceFolder
+            ) =>
+            {
+                if action == ClientContextMenuAction::MoveToFolder {
+                    self.open_move_to_folder(FolderItem::Agent {
+                        pane_id,
+                        workspace_id,
+                    });
+                } else {
+                    self.folders.follow_space(&pane_id);
+                    self.persist_chrome_preferences(outcome);
+                }
+            }
+            ClientContextMenuTarget::Folder { section, path } => {
+                self.activate_folder_action(section, Some(path), action, outcome)
+            }
+            ClientContextMenuTarget::SidebarSection { section, .. } => {
+                self.activate_folder_action(section, None, action, outcome)
+            }
             ClientContextMenuTarget::Tab {
                 tab_id,
                 workspace_id,

@@ -94,6 +94,10 @@ pub(super) struct ShellHitMap {
     pub(super) popup: Option<PaneHit>,
     pub(super) pane_splits: Vec<PaneSplitHit>,
     pub(super) agents: Vec<(Rect, String)>,
+    pub(super) folders: Vec<FolderHit>,
+    pub(super) spaces_header: Rect,
+    pub(super) agents_header: Rect,
+    pub(super) sidebar_filter_button: Rect,
     pub(super) endpoint_agents: Vec<(Rect, ClientEndpointId, String)>,
     pub(super) agent_body: Rect,
     pub(super) agent_scrollbar: Rect,
@@ -179,6 +183,47 @@ pub(super) struct ClientWorkspacePress {
     pub(super) start_row: u16,
 }
 
+/// A press on an agent row: a click focuses it, a drag files it into a folder.
+pub(super) struct ClientAgentPress {
+    pub(super) pane_id: String,
+    pub(super) start_column: u16,
+    pub(super) start_row: u16,
+}
+
+/// A press on a folder row: a click opens or closes it, a drag moves it.
+pub(super) struct ClientFolderPress {
+    pub(super) section: super::folders::FolderSection,
+    pub(super) path: String,
+    pub(super) start_column: u16,
+    pub(super) start_row: u16,
+}
+
+/// Where a dragged agent or folder lands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum FolderDropTarget {
+    TopLevel,
+    Folder(String),
+}
+
+/// Where a dragged space lands: before a space, at the end of the list, or into
+/// a folder. `folder` is None in sidebars without folders.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum WorkspaceDropTarget {
+    Slot {
+        before_workspace_id: Option<String>,
+        row: u16,
+        indent: u16,
+        folder: Option<FolderDropTarget>,
+    },
+    Folder(String),
+}
+
+pub(super) struct FolderHit {
+    pub(super) rect: Rect,
+    pub(super) section: super::folders::FolderSection,
+    pub(super) path: String,
+}
+
 pub(super) struct ClientTabPress {
     pub(super) tab_id: String,
     pub(super) workspace_id: String,
@@ -214,7 +259,15 @@ pub(super) enum ClientChromeDrag {
     },
     Workspace {
         source_workspace_id: String,
-        target: Option<(Option<String>, u16)>,
+        target: Option<WorkspaceDropTarget>,
+    },
+    Agent {
+        pane_id: String,
+        target: Option<FolderDropTarget>,
+    },
+    Folder {
+        path: String,
+        target: Option<FolderDropTarget>,
     },
     PaneSplit {
         hit: PaneSplitHit,
@@ -318,6 +371,17 @@ pub(super) enum ClientRenameTarget {
     Reminder {
         pane_id: String,
     },
+    MoveToFolder {
+        item: FolderItem,
+    },
+    NewFolder {
+        parent: Option<String>,
+    },
+    RenameFolder {
+        path: String,
+    },
+    /// Filters the sidebar while the words are typed; Esc keeps the old filter.
+    SidebarFilter,
 }
 
 #[derive(Debug)]
@@ -532,6 +596,32 @@ pub(super) enum ClientContextMenuAction {
     MarkTodoDone,
     RemindMe,
     CancelReminder,
+    MoveToFolder,
+    FollowSpaceFolder,
+    NewFolder,
+    RenameFolder,
+    DeleteFolder,
+    ShowOnlyFolder,
+    FilterSidebar,
+    ClearSidebarFilter,
+    ExpandAllFolders,
+    CollapseAllFolders,
+    MoveShownToFolder,
+}
+
+/// What a folder dialog files: a space (by the first row of its worktree
+/// group) or an agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum FolderItem {
+    Space {
+        workspace_id: String,
+    },
+    Agent {
+        pane_id: String,
+        workspace_id: String,
+    },
+    /// Every space or agent the sidebar filter shows.
+    Shown(super::folders::FolderSection),
 }
 
 /// What a context menu knows about a pane's TODO mark, present only when the
@@ -551,6 +641,8 @@ pub(super) enum ClientContextMenuTarget {
         has_worktree_children: bool,
         close_group: bool,
         collapsed: bool,
+        /// The sidebar files spaces into folders.
+        folders: bool,
     },
     Tab {
         tab_id: String,
@@ -566,7 +658,18 @@ pub(super) enum ClientContextMenuTarget {
     },
     Agent {
         pane_id: String,
-        todo: PaneTodoMenu,
+        workspace_id: String,
+        todo: Option<PaneTodoMenu>,
+        filed_apart: bool,
+    },
+    Folder {
+        section: super::folders::FolderSection,
+        path: String,
+    },
+    /// The header or empty space of the spaces or agents list.
+    SidebarSection {
+        section: super::folders::FolderSection,
+        filtered: bool,
     },
 }
 
@@ -902,6 +1005,12 @@ pub(crate) struct ClientShellState {
     pub(super) tab_press: Option<ClientTabPress>,
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
+    /// Sidebar folders of the local server's spaces and agents.
+    pub(super) folders: super::folders::SidebarFolders,
+    /// Words the sidebar's spaces and agents are filtered by.
+    pub(super) sidebar_filter: String,
+    pub(super) agent_press: Option<ClientAgentPress>,
+    pub(super) folder_press: Option<ClientFolderPress>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
     pub(super) pending_agent_reveal: Option<(ClientEndpointId, String)>,
@@ -1006,7 +1115,7 @@ pub(super) fn release_notes_state(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct WorkspaceEntry {
     pub(super) index: usize,
     pub(super) indented: bool,
@@ -1077,6 +1186,10 @@ impl ClientShellState {
             tab_press: None,
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
+            folders: preferences.folders,
+            sidebar_filter: String::new(),
+            agent_press: None,
+            folder_press: None,
             workspace_scroll: 0,
             agent_scroll: 0,
             pending_agent_reveal: None,
@@ -1212,7 +1325,7 @@ impl ClientShellState {
         if self.mobile_layout_active() {
             render::workspace_entries(snapshot, &empty_collapsed_groups)
         } else {
-            render::workspace_entries(
+            self.sidebar_space_entries(
                 snapshot,
                 self.collapsed_groups_for_endpoint(&self.active_endpoint_id)
                     .unwrap_or(&empty_collapsed_groups),
@@ -1230,6 +1343,9 @@ impl ClientShellState {
             return;
         }
         let target = self.snapshot.as_deref().and_then(|snapshot| {
+            if self.sidebar_has_folders() {
+                return self.sidebar_space_row(snapshot, workspace_id);
+            }
             self.navigation_workspace_entries(snapshot)
                 .iter()
                 .position(|entry| snapshot.workspaces[entry.index].workspace_id == workspace_id)

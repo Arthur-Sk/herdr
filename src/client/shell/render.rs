@@ -103,6 +103,8 @@ pub(super) fn render_mode_bar(
                     (" esc back  ".to_owned(), base),
                     ("↑/↓".to_owned(), key),
                     (" workspace  ".to_owned(), base),
+                    ("/".to_owned(), key),
+                    (" filter  ".to_owned(), base),
                     ("tab".to_owned(), key),
                     (" pane  ".to_owned(), base),
                     (prefix_rhs(&keybinds.keybinds.help), key),
@@ -248,6 +250,58 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) reveal_navigation_workspace: &'a mut bool,
     pub(super) dragged_workspace_id: Option<&'a str>,
     pub(super) workspace_drop_indicator_row: Option<u16>,
+    pub(super) folder_view: SidebarFolderView<'a>,
+}
+
+/// What the sidebar needs to draw folders: the folders (None in sidebars
+/// without them), the filter in effect and an ongoing drag.
+#[derive(Clone, Default)]
+pub(super) struct SidebarFolderView<'a> {
+    pub(super) folders: Option<&'a super::folders::SidebarFolders>,
+    pub(super) filter: super::folders::SidebarFilter,
+    /// The filter as typed, shown in the spaces header.
+    pub(super) filter_text: &'a str,
+    pub(super) drop_folder: Option<&'a str>,
+    pub(super) drop_top_level: bool,
+    pub(super) drop_indent: u16,
+    pub(super) dragged_agent: Option<&'a str>,
+    pub(super) dragged_folder: Option<&'a str>,
+}
+
+pub(super) fn sidebar_folder_view<'a>(
+    folders: Option<&'a super::folders::SidebarFolders>,
+    filter: super::folders::SidebarFilter,
+    filter_text: &'a str,
+    drag: Option<&'a ClientChromeDrag>,
+) -> SidebarFolderView<'a> {
+    let mut view = SidebarFolderView {
+        folders,
+        filter,
+        filter_text,
+        ..SidebarFolderView::default()
+    };
+    let mut set_target = |target: Option<&'a FolderDropTarget>| match target {
+        Some(FolderDropTarget::Folder(path)) => view.drop_folder = Some(path),
+        Some(FolderDropTarget::TopLevel) => view.drop_top_level = true,
+        None => {}
+    };
+    match drag {
+        Some(ClientChromeDrag::Agent { pane_id, target }) => {
+            set_target(target.as_ref());
+            view.dragged_agent = Some(pane_id);
+        }
+        Some(ClientChromeDrag::Folder { path, target, .. }) => {
+            set_target(target.as_ref());
+            view.dragged_folder = Some(path);
+        }
+        Some(ClientChromeDrag::Workspace { target, .. }) => match target {
+            Some(WorkspaceDropTarget::Folder(path)) => view.drop_folder = Some(path),
+            Some(WorkspaceDropTarget::Slot { indent, .. }) => view.drop_indent = *indent,
+            None => {}
+        },
+        _ => {}
+    }
+    view
 }
 
 pub(super) fn render_shell(
@@ -296,6 +350,7 @@ pub(super) fn render_shell(
                 state
                     .selected_workspace_id
                     .map(|target| target.workspace_id.as_str()),
+                state.folder_view.folders,
                 &mut hits,
             );
         } else {

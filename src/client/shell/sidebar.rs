@@ -50,6 +50,7 @@ pub(crate) fn render_collapsed_sidebar(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     selected_workspace_id: Option<&str>,
+    folders: Option<&super::super::folders::SidebarFolders>,
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
@@ -127,7 +128,14 @@ pub(crate) fn render_collapsed_sidebar(
         detail_area.width,
         detail_area.height.saturating_sub(1),
     );
-    for (index, pane_id) in super::ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
+    let agent_order = super::ordered_agent_pane_ids(snapshot, config.agent_panel_sort);
+    let agent_order = match folders.filter(|_| snapshot.agent_view_label.is_none()) {
+        Some(folders) => {
+            super::super::folders::agent_order_in_folders(snapshot, agent_order, folders)
+        }
+        None => agent_order,
+    };
+    for (index, pane_id) in agent_order
         .into_iter()
         .take(detail_content.height as usize)
         .enumerate()
@@ -230,18 +238,21 @@ pub(crate) fn render_sidebar(
         crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
     hits.sidebar_section_divider =
         crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
-    put_text(
-        buffer,
-        workspace_area.x,
-        workspace_area.y,
-        workspace_area.width,
-        " spaces",
-        Style::default()
-            .fg(palette.overlay0)
-            .add_modifier(Modifier::BOLD),
-    );
+    render_spaces_header(buffer, workspace_area, config, &state.folder_view, hits);
 
-    let entries = workspace_entries(snapshot, state.collapsed_groups);
+    let rows: Vec<super::super::folders::SpacesRow> = match state.folder_view.folders {
+        Some(folders) => super::super::folders::spaces_rows(
+            snapshot,
+            state.collapsed_groups,
+            folders,
+            &state.folder_view.filter,
+        ),
+        None => workspace_entries(snapshot, state.collapsed_groups)
+            .into_iter()
+            .map(|entry| super::super::folders::SpacesRow::Space { entry, depth: 0 })
+            .collect(),
+    };
+    use super::super::folders::SpacesRow;
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -251,10 +262,11 @@ pub(crate) fn render_sidebar(
             .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
     );
     hits.workspace_body = body;
-    let row_heights = entries
+    let row_heights = rows
         .iter()
-        .map(|entry| {
-            snapshot
+        .map(|row| match row {
+            SpacesRow::Folder(_) => 1,
+            SpacesRow::Space { entry, .. } => snapshot
                 .workspaces
                 .get(entry.index)
                 .map(|workspace| {
@@ -268,17 +280,17 @@ pub(crate) fn render_sidebar(
                     .max(1)
                     .min(u16::MAX as usize) as u16
                 })
-                .unwrap_or(1)
+                .unwrap_or(1),
         })
         .collect::<Vec<_>>();
-    let gaps = entries
+    let gap_before = |row: &SpacesRow| match row {
+        SpacesRow::Space { entry, .. } => u16::from(!entry.indented) * config.spaces.row_gap,
+        SpacesRow::Folder(_) => config.spaces.row_gap,
+    };
+    let gaps = rows
         .iter()
         .enumerate()
-        .map(|(index, _)| {
-            entries
-                .get(index + 1)
-                .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap)
-        })
+        .map(|(index, _)| rows.get(index + 1).map_or(0, gap_before))
         .collect::<Vec<_>>();
     let mut metrics = super::scroll::list_scroll_metrics(
         &row_heights,
@@ -287,10 +299,10 @@ pub(crate) fn render_sidebar(
         *state.workspace_scroll,
     );
     if !body.is_empty() && std::mem::take(state.reveal_focused_workspace) {
-        if let Some(target) = entries
-            .iter()
-            .position(|entry| snapshot.workspaces[entry.index].focused)
-        {
+        if let Some(target) = rows.iter().position(|row| match row {
+            SpacesRow::Space { entry, .. } => snapshot.workspaces[entry.index].focused,
+            SpacesRow::Folder(_) => false,
+        }) {
             *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
                 &row_heights,
                 &gaps,
@@ -314,17 +326,49 @@ pub(crate) fn render_sidebar(
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     let mut y = body.y;
-    for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
-        let Some(workspace) = snapshot.workspaces.get(entry.index) else {
-            continue;
-        };
-        let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
-        let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
-        let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
+    if rows.is_empty() && state.folder_view.filter.is_active() && !body.is_empty() {
+        put_text(
+            buffer,
+            body.x,
+            body.y,
+            body.width,
+            " no matching spaces",
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM),
+        );
+    }
+    for (row_position, row) in rows.iter().enumerate().skip(*state.workspace_scroll) {
+        let row_height = row_heights[row_position].min(body.height);
         if y.saturating_add(row_height) > body.bottom() {
             break;
         }
         let rect = Rect::new(body.x, y, content_width, row_height);
+        let gap = gaps[row_position];
+        let (entry, depth) = match row {
+            SpacesRow::Folder(folder) => {
+                crate::client::shell::agent_sidebar::render_folder_row(
+                    buffer,
+                    rect,
+                    folder,
+                    &state.folder_view,
+                    config,
+                );
+                hits.folders.push(FolderHit {
+                    rect,
+                    section: super::super::folders::FolderSection::Spaces,
+                    path: folder.path.clone(),
+                });
+                y = y.saturating_add(row_height + gap);
+                continue;
+            }
+            SpacesRow::Space { entry, depth } => (entry, *depth),
+        };
+        let Some(workspace) = snapshot.workspaces.get(entry.index) else {
+            continue;
+        };
+        let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
+        let workspace_lines = workspace_rows(workspace, status, entry.indented, &config.spaces);
         let selected = state.selected_workspace_id.is_some_and(|target| {
             target.matches(state.active_endpoint_id, &workspace.workspace_id)
         });
@@ -336,13 +380,20 @@ pub(crate) fn render_sidebar(
         } else if workspace.focused {
             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
         }
+        let indent = depth.saturating_mul(2).min(rect.width.saturating_sub(4));
+        let content = Rect::new(
+            rect.x + indent,
+            rect.y,
+            rect.width.saturating_sub(indent),
+            rect.height,
+        );
         render_workspace_rows(
             buffer,
-            rect,
+            content,
             status,
             config.status_indicators,
             entry,
-            rows,
+            workspace_lines,
             workspace.focused,
             selected,
             state.selected_workspace_id.is_some(),
@@ -364,9 +415,6 @@ pub(crate) fn render_sidebar(
             indented: entry.indented,
             group_toggle,
         });
-        let gap = entries
-            .get(entry_position + 1)
-            .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
         y = y.saturating_add(row_height + gap);
     }
 
@@ -380,12 +428,16 @@ pub(crate) fn render_sidebar(
         *row >= workspace_area.y.saturating_add(1)
             && *row < workspace_area.bottom().saturating_sub(1)
     }) {
+        let indent = state
+            .folder_view
+            .drop_indent
+            .min(body.width.saturating_sub(4));
         put_text(
             buffer,
-            body.x,
+            body.x + indent,
             row,
-            body.width,
-            &"─".repeat(body.width as usize),
+            body.width.saturating_sub(indent),
+            &"─".repeat(body.width.saturating_sub(indent) as usize),
             Style::default().fg(palette.accent),
         );
     }
@@ -451,6 +503,7 @@ pub(crate) fn render_sidebar(
         snapshot,
         config,
         state.agent_scroll,
+        &state.folder_view,
         hits,
     );
 
@@ -468,6 +521,86 @@ pub(crate) fn render_sidebar(
         "«",
         Style::default().fg(palette.overlay0),
     );
+}
+
+/// The spaces header: the title, the filter in effect, and the filter button
+/// in sidebars with folders.
+fn render_spaces_header(
+    buffer: &mut Buffer,
+    workspace_area: Rect,
+    config: &ClientShellConfig,
+    view: &super::SidebarFolderView<'_>,
+    hits: &mut ShellHitMap,
+) {
+    let palette = &config.palette;
+    let header = Rect::new(
+        workspace_area.x,
+        workspace_area.y,
+        workspace_area.width,
+        u16::from(workspace_area.height > 0),
+    );
+    if view.drop_top_level {
+        buffer.set_style(header, Style::default().bg(palette.surface1));
+    }
+    put_text(
+        buffer,
+        header.x,
+        header.y,
+        header.width,
+        " spaces",
+        Style::default()
+            .fg(if view.drop_top_level {
+                palette.accent
+            } else {
+                palette.overlay0
+            })
+            .add_modifier(Modifier::BOLD),
+    );
+    if view.folders.is_none() {
+        return;
+    }
+    hits.spaces_header = header;
+    let button_width = 3.min(header.width);
+    let button = Rect::new(
+        header.right().saturating_sub(button_width + 1),
+        header.y,
+        button_width,
+        header.height,
+    );
+    if view.filter.is_active() {
+        let start = header.x.saturating_add(8);
+        let text = format!("⌕ {}", view.filter_text.trim());
+        put_text(
+            buffer,
+            start,
+            header.y,
+            button.x.saturating_sub(start + 1),
+            &text,
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        );
+        put_text(
+            buffer,
+            button.x,
+            header.y,
+            button.width,
+            " ✕ ",
+            Style::default().fg(palette.accent),
+        );
+    } else {
+        put_text(
+            buffer,
+            button.x,
+            header.y,
+            button.width,
+            " ⌕ ",
+            Style::default().fg(palette.overlay0),
+        );
+    }
+    if config.mouse_capture {
+        hits.sidebar_filter_button = button;
+    }
 }
 
 pub(crate) fn workspace_entries(

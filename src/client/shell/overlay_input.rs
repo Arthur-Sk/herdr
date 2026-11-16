@@ -941,7 +941,15 @@ impl ClientShellState {
             return;
         };
         let trimmed = rename.input.trim();
+        if self.save_folder_dialog(&rename.target, trimmed, outcome) {
+            outcome.repaint = true;
+            return;
+        }
         let method = match rename.target {
+            ClientRenameTarget::MoveToFolder { .. }
+            | ClientRenameTarget::NewFolder { .. }
+            | ClientRenameTarget::RenameFolder { .. }
+            | ClientRenameTarget::SidebarFilter => None,
             ClientRenameTarget::NewWorkspace {
                 source_workspace_id,
                 cwd,

@@ -508,7 +508,20 @@ impl ClientShellState {
         Some(last_index + 1)
     }
 
-    fn workspace_drop_target_at(&self, point: (u16, u16)) -> Option<(Option<String>, u16)> {
+    fn workspace_drop_target_at(&self, point: (u16, u16)) -> Option<WorkspaceDropTarget> {
+        if self.sidebar_has_folders() {
+            return self.folder_workspace_drop_target_at(point);
+        }
+        self.plain_workspace_drop_target_at(point)
+            .map(|(before_workspace_id, row)| WorkspaceDropTarget::Slot {
+                before_workspace_id,
+                row,
+                indent: 0,
+                folder: None,
+            })
+    }
+
+    fn plain_workspace_drop_target_at(&self, point: (u16, u16)) -> Option<(Option<String>, u16)> {
         if self.hits.workspace_body.height == 0
             || point.1 < self.hits.workspace_body.y.saturating_sub(1)
             || point.1 >= self.hits.new_workspace.y
@@ -1215,7 +1228,57 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                Some(ClientChromeDrag::Agent { .. }) => {
+                    let target = self.sidebar_folder_target_at(point);
+                    if let Some(ClientChromeDrag::Agent {
+                        target: current, ..
+                    }) = self.chrome_drag.as_mut()
+                    {
+                        *current = target;
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
+                Some(ClientChromeDrag::Folder { path, .. }) => {
+                    let target = self.folder_drag_target_at(&path.clone(), point);
+                    if let Some(ClientChromeDrag::Folder {
+                        target: current, ..
+                    }) = self.chrome_drag.as_mut()
+                    {
+                        *current = target;
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
                 None => {}
+            }
+            if let Some(press) = self.folder_press.as_ref() {
+                let delta = mouse
+                    .column
+                    .abs_diff(press.start_column)
+                    .max(mouse.row.abs_diff(press.start_row));
+                if delta >= 1 {
+                    let path = press.path.clone();
+                    let target = self.folder_drag_target_at(&path, point);
+                    self.folder_press = None;
+                    self.chrome_drag = Some(ClientChromeDrag::Folder { path, target });
+                    outcome.repaint = true;
+                }
+                return;
+            }
+            if let Some(press) = self.agent_press.as_ref() {
+                let delta = mouse
+                    .column
+                    .abs_diff(press.start_column)
+                    .max(mouse.row.abs_diff(press.start_row));
+                if delta >= 1 {
+                    let pane_id = press.pane_id.clone();
+                    let target = self.sidebar_folder_target_at(point);
+                    self.agent_press = None;
+                    self.chrome_drag = Some(ClientChromeDrag::Agent { pane_id, target });
+                    outcome.repaint = true;
+                }
+                return;
             }
             if let Some(press) = self.workspace_press.as_ref() {
                 let delta = mouse
@@ -1259,7 +1322,21 @@ impl ClientShellState {
             if let Some(drag) = self.chrome_drag.take() {
                 self.workspace_press = None;
                 self.tab_press = None;
+                self.agent_press = None;
+                self.folder_press = None;
                 match drag {
+                    ClientChromeDrag::Agent { pane_id, target } => {
+                        if let Some(target) = self.sidebar_folder_target_at(point).or(target) {
+                            self.drop_agent(&pane_id, target, outcome);
+                        }
+                        outcome.repaint = true;
+                    }
+                    ClientChromeDrag::Folder { path, target } => {
+                        if let Some(target) = self.folder_drag_target_at(&path, point).or(target) {
+                            self.drop_folder(&path, target, outcome);
+                        }
+                        outcome.repaint = true;
+                    }
                     ClientChromeDrag::Tab {
                         tab_id,
                         workspace_id,
@@ -1297,12 +1374,25 @@ impl ClientShellState {
                         source_workspace_id,
                         target,
                     } => {
-                        if let Some((before_workspace_id, _)) = target {
-                            if let Some(method) = self.workspace_move_method(
-                                &source_workspace_id,
-                                before_workspace_id.as_deref(),
-                            ) {
-                                self.push_endpoint_method(method, outcome);
+                        if let Some(target) = target {
+                            // A slot moves the space before its neighbour; a folder row
+                            // puts it on top of the folder's spaces.
+                            let before = match &target {
+                                WorkspaceDropTarget::Slot {
+                                    before_workspace_id,
+                                    ..
+                                } => Some(before_workspace_id.clone()),
+                                WorkspaceDropTarget::Folder(path) => self
+                                    .first_space_in_folder(path, &source_workspace_id)
+                                    .map(Some),
+                            };
+                            self.file_dropped_space(&source_workspace_id, &target, outcome);
+                            if let Some(before) = before {
+                                if let Some(method) = self
+                                    .workspace_move_method(&source_workspace_id, before.as_deref())
+                                {
+                                    self.push_endpoint_method(method, outcome);
+                                }
                             }
                         }
                         outcome.repaint = true;
@@ -1367,6 +1457,13 @@ impl ClientShellState {
                     | ClientChromeDrag::ProductAnnouncementScrollbar { .. }
                     | ClientChromeDrag::ReleaseNotesScrollbar { .. } => {}
                 }
+                return;
+            }
+            if let Some(press) = self.folder_press.take() {
+                self.toggle_folder(press.section, &press.path, outcome);
+                return;
+            }
+            if self.agent_press.take().is_some() {
                 return;
             }
             if let Some(press) = self.workspace_press.take() {
@@ -1835,6 +1932,17 @@ impl ClientShellState {
                 if !self.config.mouse_capture {
                     return;
                 }
+                let folder = self
+                    .hits
+                    .folders
+                    .iter()
+                    .find(|hit| super::contains(hit.rect, point))
+                    .map(|hit| (hit.section, hit.path.clone()));
+                if let Some((section, path)) = folder {
+                    self.open_folder_context_menu(section, path, mouse.column, mouse.row);
+                    outcome.repaint = true;
+                    return;
+                }
                 let workspace_id = (!self.sidebar_collapsed)
                     .then(|| self.active_endpoint_workspace_at(point))
                     .flatten();
@@ -1853,6 +1961,22 @@ impl ClientShellState {
                     if self.open_agent_context_menu(pane_id, mouse.column, mouse.row) {
                         outcome.repaint = true;
                     }
+                    return;
+                }
+                let section = if super::contains(self.hits.spaces_header, point)
+                    || super::contains(self.hits.workspace_body, point)
+                {
+                    Some(super::folders::FolderSection::Spaces)
+                } else if super::contains(self.hits.agents_header, point)
+                    || super::contains(self.hits.agent_body, point)
+                {
+                    Some(super::folders::FolderSection::Agents)
+                } else {
+                    None
+                };
+                if let Some(section) = section.filter(|_| self.sidebar_has_folders()) {
+                    self.open_sidebar_section_context_menu(section, mouse.column, mouse.row);
+                    outcome.repaint = true;
                     return;
                 }
                 let tab_id = self
@@ -2100,6 +2224,30 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                if super::contains(self.hits.sidebar_filter_button, point) {
+                    if self.sidebar_filter.trim().is_empty() {
+                        self.open_sidebar_filter();
+                    } else {
+                        self.sidebar_filter.clear();
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
+                let folder_press = self
+                    .hits
+                    .folders
+                    .iter()
+                    .find(|hit| super::contains(hit.rect, point))
+                    .map(|hit| ClientFolderPress {
+                        section: hit.section,
+                        path: hit.path.clone(),
+                        start_column: mouse.column,
+                        start_row: mouse.row,
+                    });
+                if let Some(folder_press) = folder_press {
+                    self.folder_press = Some(folder_press);
+                    return;
+                }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {
                     let (rect, key) = hit.group_toggle.as_ref()?;
                     super::contains(*rect, point).then(|| (hit.endpoint_id.clone(), key.clone()))
@@ -2163,6 +2311,13 @@ impl ClientShellState {
                     .find(|(rect, _)| super::contains(*rect, point))
                     .map(|(_, pane_id)| pane_id.clone());
                 if let Some(pane_id) = agent_pane_id {
+                    if self.sidebar_has_folders() {
+                        self.agent_press = Some(ClientAgentPress {
+                            pane_id: pane_id.clone(),
+                            start_column: mouse.column,
+                            start_row: mouse.row,
+                        });
+                    }
                     self.push_endpoint_method(
                         crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
                             pane_id,

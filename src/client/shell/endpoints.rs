@@ -711,6 +711,9 @@ impl ClientShellState {
             return;
         };
         if endpoint_id == &self.active_endpoint_id {
+            if self.sidebar_has_folders() {
+                self.folders.prune(&snapshot);
+            }
             self.apply_active_snapshot(snapshot, generation);
         }
     }

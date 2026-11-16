@@ -108,7 +108,8 @@ fn agent_row_menu_marks_todo_through_the_endpoint_api() {
         menu_actions(&state),
         vec![
             ClientContextMenuAction::MarkTodo,
-            ClientContextMenuAction::RemindMe
+            ClientContextMenuAction::RemindMe,
+            ClientContextMenuAction::MoveToFolder,
         ]
     );
 
@@ -128,6 +129,7 @@ fn marked_agent_offers_done_and_reminder_changes() {
             ClientContextMenuAction::MarkTodoDone,
             ClientContextMenuAction::RemindMe,
             ClientContextMenuAction::CancelReminder,
+            ClientContextMenuAction::MoveToFolder,
         ]
     );
     let params = todo_set(&choose(&mut state, ClientContextMenuAction::MarkTodoDone));
@@ -140,11 +142,14 @@ fn marked_agent_offers_done_and_reminder_changes() {
 }
 
 #[test]
-fn agent_row_menu_stays_closed_when_the_server_lacks_todo_marks() {
+fn agent_row_menu_offers_only_folders_when_the_server_lacks_todo_marks() {
     let mut state = state_with(Vec::new(), false);
     let open = right_click_agent_row(&mut state);
     assert!(open.actions.is_empty());
-    assert!(state.overlay.is_none());
+    assert_eq!(
+        menu_actions(&state),
+        vec![ClientContextMenuAction::MoveToFolder]
+    );
 }
 
 #[test]
