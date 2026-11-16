@@ -1033,7 +1033,14 @@ impl ClientShellState {
         if self.handle_mobile_mouse(mouse, outcome) {
             return;
         }
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+        ) {
+            self.drag_pointer = None;
+        }
         if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
+            self.drag_pointer = Some((mouse.column, mouse.row));
             match self.chrome_drag.as_ref() {
                 Some(ClientChromeDrag::SidebarWidth) => {
                     self.set_sidebar_width_from_column(mouse.column, outcome);
@@ -1815,7 +1822,21 @@ impl ClientShellState {
             if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
                 return;
             }
-            if super::contains(self.hits.overlay_primary, point) {
+            let choice = self
+                .hits
+                .folder_choice_rows
+                .iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+                .map(|(_, index)| *index);
+            if let Some(index) = choice {
+                self.pick_folder_choice(index, outcome);
+                outcome.repaint = true;
+            } else if super::contains(self.hits.folder_picker_popup, point)
+                && !super::contains(self.hits.overlay_cancel, point)
+                && !super::contains(self.hits.overlay_primary, point)
+            {
+                // A click inside the picker but off its lines keeps it open.
+            } else if super::contains(self.hits.overlay_primary, point) {
                 match self.overlay.as_ref() {
                     Some(ClientShellOverlay::Rename(_)) => self.save_rename_overlay(outcome),
                     Some(ClientShellOverlay::ConfirmClose(_)) => {

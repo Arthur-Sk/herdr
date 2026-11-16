@@ -913,6 +913,38 @@ impl ClientShellState {
             outcome.repaint = true;
             return;
         }
+        if matches!(rename.target, ClientRenameTarget::MoveToFolder { .. }) {
+            let delta = match key.code {
+                KeyCode::Up => Some(-1),
+                KeyCode::Down | KeyCode::Tab => Some(1),
+                KeyCode::BackTab => Some(-1),
+                KeyCode::PageUp => Some(-10),
+                KeyCode::PageDown => Some(10),
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                outcome.repaint |= self.move_folder_choice(delta);
+                return;
+            }
+        }
+        let before = rename.input.to_string();
+        self.edit_rename_input(key, outcome);
+        if let Some(ClientShellOverlay::Rename(rename)) = self.overlay.as_ref() {
+            if *rename.input != *before {
+                self.reset_folder_choice();
+            }
+        }
+    }
+
+    fn edit_rename_input(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) {
+        use crossterm::event::KeyModifiers;
+        let Some(ClientShellOverlay::Rename(rename)) = self.overlay.as_mut() else {
+            return;
+        };
         if key
             .generated_text
             .as_deref()

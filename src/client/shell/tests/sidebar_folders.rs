@@ -420,6 +420,106 @@ fn move_to_folder_dialog_files_a_space_into_nested_folders() {
     assert_eq!(state.folders.space_folder("w3"), Some("ASOUP"));
 }
 
+fn picker_lines(state: &mut ClientShellState) -> Vec<String> {
+    let text = compose(state);
+    let lines = text.lines().map(str::to_owned).collect::<Vec<_>>();
+    state
+        .hits
+        .folder_choice_rows
+        .iter()
+        .map(|(rect, _)| {
+            lines[rect.y as usize]
+                .chars()
+                .skip(rect.x as usize)
+                .take(rect.width as usize)
+                .collect::<String>()
+                .trim()
+                .to_owned()
+        })
+        .collect()
+}
+
+fn open_space_picker(state: &mut ClientShellState, workspace_id: &str) {
+    compose(state);
+    let at = space_at(state, workspace_id);
+    mouse(state, MouseEventKind::Down(MouseButton::Right), at);
+    choose(state, ClientContextMenuAction::MoveToFolder);
+}
+
+#[test]
+fn folder_picker_lists_existing_folders_and_moves_with_the_arrows() {
+    let mut state = state_with(filed(&[("w1", "ASOUP/THEX"), ("w2", "home")]));
+    open_space_picker(&mut state, "w2");
+    let text = compose(&mut state);
+    assert!(text.contains("move «thex-core» to folder"), "{text}");
+    let lines = picker_lines(&mut state);
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    assert_eq!(lines[0], "⌂ top level");
+    assert_eq!(lines[1], "▸ ASOUP");
+    assert_eq!(lines[2], "▸ THEX");
+    assert!(lines[3].starts_with("▸ home") && lines[3].ends_with("current"));
+
+    // The current folder is highlighted first; Up reaches THEX.
+    state.handle_input_bytes(b"\x1b[A");
+    let saved = state.handle_input_bytes(b"\r");
+    assert!(saved.actions.is_empty());
+    assert!(state.overlay.is_none());
+    assert_eq!(state.folders.space_folder("w2"), Some("ASOUP/THEX"));
+}
+
+#[test]
+fn folder_picker_searches_and_offers_a_new_folder() {
+    let mut state = state_with(filed(&[("w1", "ASOUP/THEX")]));
+    open_space_picker(&mut state, "w3");
+    state.handle_input_bytes(b"thex");
+    assert_eq!(
+        picker_lines(&mut state),
+        ["▸ ASOUP/THEX", "+ new folder thex"]
+    );
+    // Typing picks the best match.
+    state.handle_input_bytes(b"\r");
+    assert_eq!(state.folders.space_folder("w3"), Some("ASOUP/THEX"));
+
+    // Down reaches the new folder.
+    open_space_picker(&mut state, "w3");
+    state.handle_input_bytes(b"Later");
+    state.handle_input_bytes(b"\x1b[B");
+    state.handle_input_bytes(b"\r");
+    assert_eq!(state.folders.space_folder("w3"), Some("Later"));
+}
+
+#[test]
+fn clicking_a_picker_line_moves_at_once() {
+    let mut state = state_with(filed(&[("w1", "Work")]));
+    open_space_picker(&mut state, "w3");
+    picker_lines(&mut state);
+    let (rect, _) = state.hits.folder_choice_rows[1];
+    // A click inside the picker but off its lines keeps it open.
+    let popup = state.hits.folder_picker_popup;
+    click(&mut state, (popup.x + 1, popup.y + 1));
+    assert!(state.overlay.is_some());
+    click(&mut state, (rect.x + 2, rect.y));
+    assert!(state.overlay.is_none());
+    assert_eq!(state.folders.space_folder("w3"), Some("Work"));
+}
+
+#[test]
+fn dragging_shows_what_moves_and_where() {
+    let mut folders = SidebarFolders::default();
+    folders.create("Later");
+    let mut state = state_with(folders);
+    compose(&mut state);
+    let from = agent_at(&state, "w3:p1");
+    let to = folder_at(&state, FolderSection::Agents, "Later");
+    mouse(&mut state, MouseEventKind::Down(MouseButton::Left), from);
+    mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), to);
+    let text = compose(&mut state);
+    assert!(text.contains("«home · battery» → ▸ Later"), "{text}");
+    mouse(&mut state, MouseEventKind::Up(MouseButton::Left), to);
+    let text = compose(&mut state);
+    assert!(!text.contains("→ ▸ Later"), "{text}");
+}
+
 #[test]
 fn filter_narrows_both_lists_while_typing_and_clears_from_the_header() {
     let mut state = state_with(filed(&[("w2", "ASOUP/THEX")]));
@@ -492,13 +592,25 @@ fn folders_are_kept_in_chrome_preferences() {
 }
 
 #[test]
-fn spaces_of_closed_workspaces_are_forgotten() {
-    let mut folders = filed(&[("w2", "ASOUP"), ("w9", "Gone")]);
-    folders.file_agent("w9:p1", "w9", Some("Gone"));
-    let state = state_with(folders);
-    assert_eq!(state.folders.space_folder("w9"), None);
-    assert!(!state.folders.agent_filed_apart("w9:p1"));
-    assert_eq!(state.folders.space_folder("w2"), Some("ASOUP"));
+fn spaces_seen_closing_are_forgotten_but_missing_ones_are_kept() {
+    let mut folders = filed(&[("w2", "ASOUP"), ("w9", "Later")]);
+    folders.file_agent("w2:p1", "w2", Some("Agents"));
+    folders.file_agent("w9:p1", "w9", Some("Elsewhere"));
+    let mut state = state_with(folders);
+    // w9 never showed up (a restart that has not brought it back): kept.
+    assert_eq!(state.folders.space_folder("w9"), Some("Later"));
+    assert!(state.folders.agent_filed_apart("w9:p1"));
+
+    // w2 closes while the client watches: forgotten with its agent.
+    let mut snapshot = state.snapshot.clone().unwrap();
+    snapshot
+        .workspaces
+        .retain(|workspace| workspace.workspace_id != "w2");
+    snapshot.agents.retain(|agent| agent.workspace_id != "w2");
+    state.set_snapshot(snapshot);
+    assert_eq!(state.folders.space_folder("w2"), None);
+    assert!(!state.folders.agent_filed_apart("w2:p1"));
+    assert_eq!(state.folders.space_folder("w9"), Some("Later"));
 }
 
 #[test]

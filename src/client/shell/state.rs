@@ -129,6 +129,8 @@ pub(super) struct ShellHitMap {
     pub(super) navigator_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) worktree_search: Rect,
     pub(super) worktree_rows: Vec<(Rect, usize)>,
+    pub(super) folder_choice_rows: Vec<(Rect, usize)>,
+    pub(super) folder_picker_popup: Rect,
     pub(super) help_popup: Rect,
     pub(super) help_scrollbar: Rect,
     pub(super) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -371,8 +373,14 @@ pub(super) enum ClientRenameTarget {
     Reminder {
         pane_id: String,
     },
+    /// The folder picker: `folders` in tree order, `selected` picked with the
+    /// arrows.
     MoveToFolder {
         item: FolderItem,
+        label: String,
+        folders: Vec<String>,
+        current: Option<String>,
+        selected: Option<super::folders::FolderChoice>,
     },
     NewFolder {
         parent: Option<String>,
@@ -1010,6 +1018,11 @@ pub(crate) struct ClientShellState {
     /// Words the sidebar's spaces and agents are filtered by.
     pub(super) sidebar_filter: String,
     pub(super) agent_press: Option<ClientAgentPress>,
+    /// Where the pointer is while a space, agent or folder is dragged.
+    pub(super) drag_pointer: Option<(u16, u16)>,
+    /// Workspace ids of the last snapshot: folders forget only spaces seen
+    /// closing, never ones a restart has not brought back yet.
+    pub(super) folder_seen_workspaces: HashSet<String>,
     pub(super) folder_press: Option<ClientFolderPress>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
@@ -1189,6 +1202,8 @@ impl ClientShellState {
             folders: preferences.folders,
             sidebar_filter: String::new(),
             agent_press: None,
+            drag_pointer: None,
+            folder_seen_workspaces: HashSet::new(),
             folder_press: None,
             workspace_scroll: 0,
             agent_scroll: 0,

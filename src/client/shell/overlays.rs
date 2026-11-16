@@ -17,6 +17,8 @@ pub(crate) struct OverlayRender {
     pub(crate) navigator_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(crate) worktree_search: Rect,
     pub(crate) worktree_rows: Vec<(Rect, usize)>,
+    pub(crate) folder_choice_rows: Vec<(Rect, usize)>,
+    pub(crate) folder_picker_popup: Rect,
     pub(crate) help_popup: Rect,
     pub(crate) help_scrollbar: Rect,
     pub(crate) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -646,6 +648,9 @@ fn render_rename_overlay(
     v: &ClientRenameOverlay,
     p: &Palette,
 ) -> Option<OverlayRender> {
+    if matches!(v.target, ClientRenameTarget::MoveToFolder { .. }) {
+        return render_folder_picker(b, v, p);
+    }
     let q = popup(b.area, 56, 7)?;
     let i = panel(b, q, p.accent, p.panel_bg)?;
     put_text(
@@ -696,6 +701,154 @@ fn render_rename_overlay(
         navigator_rows: Vec::new(),
         worktree_search: Rect::default(),
         worktree_rows: Vec::new(),
+        cursor,
+        ..OverlayRender::default()
+    })
+}
+
+/// The folder picker: a search line over the folders, the top level and a
+/// new folder named by what is typed.
+fn render_folder_picker(
+    b: &mut Buffer,
+    v: &ClientRenameOverlay,
+    p: &Palette,
+) -> Option<OverlayRender> {
+    use super::super::folders::{folder_choices, folder_name, selected_choice_index, FolderChoice};
+
+    let ClientRenameTarget::MoveToFolder {
+        label,
+        folders,
+        current,
+        selected,
+        ..
+    } = &v.target
+    else {
+        return None;
+    };
+    let choices = folder_choices(folders, &v.input);
+    let selected_index = selected_choice_index(&choices, selected.as_ref());
+    let list_rows = choices.len().clamp(1, 14) as u16;
+    let q = popup(b.area, 60, list_rows + 8)?;
+    let i = panel(b, q, p.accent, p.panel_bg)?;
+    let title = Style::default()
+        .fg(p.text)
+        .bg(p.panel_bg)
+        .add_modifier(Modifier::BOLD);
+    put_text(
+        b,
+        i.x,
+        i.y,
+        i.width,
+        &format!("move {label} to folder"),
+        title,
+    );
+    let input = Rect::new(i.x, i.y + 2, i.width, 1);
+    let field = Style::default().fg(p.text).bg(p.surface0);
+    b.set_style(input, field);
+    put_text(b, input.x, input.y, 2, "⌕ ", field.fg(p.overlay0));
+    let cursor = text_editor::render(
+        b,
+        Rect::new(input.x + 2, input.y, input.width.saturating_sub(2), 1),
+        &v.input,
+        field,
+    );
+    let typed = !v.input.trim().is_empty();
+    if !typed {
+        put_text(
+            b,
+            input.x + 3,
+            input.y,
+            input.width.saturating_sub(3),
+            "type to search, or a name for a new folder",
+            field.fg(p.overlay0),
+        );
+    }
+    let list = Rect::new(
+        i.x,
+        i.y + 4,
+        i.width,
+        i.height.saturating_sub(6).min(list_rows),
+    );
+    let visible = usize::from(list.height.max(1));
+    let start = (selected_index + 1).saturating_sub(visible);
+    let mut rows = Vec::new();
+    for (index, choice) in choices.iter().enumerate().skip(start).take(visible) {
+        let rect = Rect::new(list.x, list.y + (index - start) as u16, list.width, 1);
+        let highlighted = index == selected_index;
+        let base = if highlighted {
+            Style::default()
+                .fg(p.text)
+                .bg(p.surface1)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0).bg(p.panel_bg)
+        };
+        b.set_style(rect, base);
+        let (text, style) = match choice {
+            FolderChoice::TopLevel => ("⌂ top level".to_owned(), base),
+            FolderChoice::Folder(path) if typed => (format!("▸ {path}"), base),
+            FolderChoice::Folder(path) => (
+                format!(
+                    "{}▸ {}",
+                    "  ".repeat(path.matches('/').count()),
+                    folder_name(path)
+                ),
+                base,
+            ),
+            FolderChoice::New(path) => (format!("+ new folder {path}"), base.fg(p.accent)),
+        };
+        let is_current =
+            choice.folder() == current.as_deref() && !matches!(choice, FolderChoice::New(_));
+        let mark = if is_current { " current " } else { "" };
+        let mark_width = display_width(mark);
+        put_text(
+            b,
+            rect.x + 1,
+            rect.y,
+            rect.width.saturating_sub(2 + mark_width),
+            &text,
+            style,
+        );
+        if is_current {
+            put_text(
+                b,
+                rect.right().saturating_sub(mark_width),
+                rect.y,
+                mark_width,
+                mark,
+                base.fg(p.overlay0),
+            );
+        }
+        rows.push((rect, index));
+    }
+    let rs = row(i, &[10, 12], 3, i.height.saturating_sub(1));
+    let [save, cancel] = rs.as_slice() else {
+        return None;
+    };
+    button(
+        b,
+        *save,
+        " ↵ move ",
+        Style::default()
+            .fg(contrast(p))
+            .bg(p.accent)
+            .add_modifier(Modifier::BOLD),
+    );
+    button(
+        b,
+        *cancel,
+        " esc cancel ",
+        Style::default()
+            .fg(p.text)
+            .bg(p.surface0)
+            .add_modifier(Modifier::BOLD),
+    );
+    Some(OverlayRender {
+        area: q,
+        primary: *save,
+        cancel: *cancel,
+        folder_choice_rows: rows,
+        folder_picker_popup: q,
         cursor,
         ..OverlayRender::default()
     })

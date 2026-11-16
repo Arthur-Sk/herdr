@@ -1,10 +1,10 @@
 //! What a person does with sidebar folders: the dialogs, the context-menu
 //! actions and dropping dragged spaces, agents and folders.
 
-use super::folders::{self, FolderSection, SidebarFilter};
+use super::folders::{self, FolderChoice, FolderSection, SidebarFilter};
 use super::*;
 
-pub(super) const MOVE_TO_FOLDER_TITLE: &str = "move to folder, e.g. ASOUP/THEX (empty: top level)";
+pub(super) const MOVE_TO_FOLDER_TITLE: &str = "move to folder";
 pub(super) const NEW_FOLDER_TITLE: &str = "new folder (a/b makes nested folders)";
 pub(super) const RENAME_FOLDER_TITLE: &str = "rename or move folder (a/b nests it)";
 pub(super) const FILTER_TITLE: &str = "filter spaces and agents: words, todo, blocked";
@@ -120,11 +120,154 @@ impl ClientShellState {
                 .map(str::to_owned),
             FolderItem::Shown(_) => None,
         };
+        let label = self.folder_item_label(&item);
+        let selected = Some(match &current {
+            Some(path) => FolderChoice::Folder(path.clone()),
+            None => FolderChoice::TopLevel,
+        });
         self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
             title: MOVE_TO_FOLDER_TITLE,
-            input: TextEditor::new(current.as_deref().unwrap_or_default(), true),
-            target: ClientRenameTarget::MoveToFolder { item },
+            input: TextEditor::new("", false),
+            target: ClientRenameTarget::MoveToFolder {
+                item,
+                label,
+                folders: folders::folders_in_tree_order(self.folders.all_paths()),
+                current,
+                selected,
+            },
         }));
+    }
+
+    /// How the folder picker and the drag label name a space, agent or the
+    /// shown rows: quoted and cut to a readable length.
+    fn folder_item_label(&self, item: &FolderItem) -> String {
+        let snapshot = self.snapshot.as_deref();
+        let text = match item {
+            FolderItem::Space { workspace_id } => snapshot
+                .and_then(|snapshot| {
+                    snapshot
+                        .workspaces
+                        .iter()
+                        .find(|workspace| workspace.workspace_id == *workspace_id)
+                })
+                .map(|workspace| workspace.label.clone())
+                .unwrap_or_else(|| workspace_id.clone()),
+            FolderItem::Agent { pane_id, .. } => snapshot
+                .and_then(|snapshot| agent_drag_label(snapshot, pane_id))
+                .unwrap_or_else(|| pane_id.clone()),
+            FolderItem::Shown(section) => {
+                let count = self.shown_folder_items(*section).len();
+                let noun = match (section, count) {
+                    (FolderSection::Spaces, 1) => "space",
+                    (FolderSection::Spaces, _) => "spaces",
+                    (FolderSection::Agents, 1) => "agent",
+                    (FolderSection::Agents, _) => "agents",
+                };
+                return format!("{count} shown {noun}");
+            }
+        };
+        format!("«{}»", cut_label(&text, 36))
+    }
+
+    /// Moves the folder picker's highlight by `delta` lines.
+    pub(super) fn move_folder_choice(&mut self, delta: isize) -> bool {
+        let Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+            input,
+            target:
+                ClientRenameTarget::MoveToFolder {
+                    folders, selected, ..
+                },
+            ..
+        })) = self.overlay.as_mut()
+        else {
+            return false;
+        };
+        let choices = folders::folder_choices(folders, input);
+        if choices.is_empty() {
+            return true;
+        }
+        let index = folders::selected_choice_index(&choices, selected.as_ref());
+        let index = index.saturating_add_signed(delta).min(choices.len() - 1);
+        *selected = Some(choices[index].clone());
+        true
+    }
+
+    /// Forgets the arrow pick after the typed words change, so the best match
+    /// is highlighted again.
+    pub(super) fn reset_folder_choice(&mut self) {
+        if let Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+            target: ClientRenameTarget::MoveToFolder { selected, .. },
+            ..
+        })) = self.overlay.as_mut()
+        {
+            *selected = None;
+        }
+    }
+
+    /// A click on a folder picker line: moves there at once.
+    pub(super) fn pick_folder_choice(&mut self, index: usize, outcome: &mut ClientShellInput) {
+        let Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+            input,
+            target:
+                ClientRenameTarget::MoveToFolder {
+                    folders, selected, ..
+                },
+            ..
+        })) = self.overlay.as_mut()
+        else {
+            return;
+        };
+        let Some(choice) = folders::folder_choices(folders, input).get(index).cloned() else {
+            return;
+        };
+        *selected = Some(choice);
+        self.save_rename_overlay(outcome);
+    }
+
+    /// The label drawn beside the pointer while a space, agent or folder is
+    /// dragged: what moves and where it lands.
+    pub(super) fn drag_ghost_text(&self) -> Option<String> {
+        let (what, target) = match self.chrome_drag.as_ref()? {
+            ClientChromeDrag::Workspace {
+                source_workspace_id,
+                target,
+            } => {
+                let what = self.folder_item_label(&FolderItem::Space {
+                    workspace_id: source_workspace_id.clone(),
+                });
+                let target = match target {
+                    None => None,
+                    Some(WorkspaceDropTarget::Folder(path)) => Some(format!("▸ {path}")),
+                    Some(WorkspaceDropTarget::Slot { folder, .. }) => Some(match folder {
+                        Some(FolderDropTarget::Folder(path)) => format!("▸ {path}"),
+                        Some(FolderDropTarget::TopLevel) => "⌂ top level".to_owned(),
+                        None => "here".to_owned(),
+                    }),
+                };
+                (what, target)
+            }
+            ClientChromeDrag::Agent { pane_id, target } => {
+                let what = self.folder_item_label(&FolderItem::Agent {
+                    pane_id: pane_id.clone(),
+                    workspace_id: String::new(),
+                });
+                (what, target.as_ref().map(drop_target_text))
+            }
+            ClientChromeDrag::Folder { path, target } => (
+                format!("▸ {}", folders::folder_name(path)),
+                target.as_ref().map(|target| match target {
+                    FolderDropTarget::Folder(parent) => {
+                        format!("▸ {parent}/{}", folders::folder_name(path))
+                    }
+                    FolderDropTarget::TopLevel => "⌂ top level".to_owned(),
+                }),
+            ),
+            _ => return None,
+        };
+        Some(match target {
+            Some(target) => format!(" {what} → {} ", cut_label(&target, 40)),
+            None => format!(" {what} ✕ "),
+        })
     }
 
     fn open_folder_dialog(&mut self, title: &'static str, text: &str, target: ClientRenameTarget) {
@@ -216,9 +359,22 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) -> bool {
         match target {
-            ClientRenameTarget::MoveToFolder { item } => {
-                let folder = folders::normalize_folder_path(text);
-                self.file_item(item, folder.as_deref());
+            ClientRenameTarget::MoveToFolder {
+                item,
+                folders,
+                selected,
+                ..
+            } => {
+                let choices = folders::folder_choices(folders, text);
+                let Some(choice) =
+                    choices.get(folders::selected_choice_index(&choices, selected.as_ref()))
+                else {
+                    return true;
+                };
+                if let FolderChoice::New(path) = choice {
+                    self.folders.create(path);
+                }
+                self.file_item(item, choice.folder());
             }
             ClientRenameTarget::NewFolder { parent } => {
                 let Some(name) = folders::normalize_folder_path(text) else {
@@ -560,4 +716,83 @@ impl ClientShellState {
             self.persist_chrome_preferences(outcome);
         }
     }
+}
+
+fn drop_target_text(target: &FolderDropTarget) -> String {
+    match target {
+        FolderDropTarget::Folder(path) => format!("▸ {path}"),
+        FolderDropTarget::TopLevel => "⌂ top level".to_owned(),
+    }
+}
+
+/// An agent as its row reads: the space, then the agent's own title.
+fn agent_drag_label(snapshot: &ClientShellSnapshot, pane_id: &str) -> Option<String> {
+    let agent = snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.pane_id == pane_id)?;
+    let space = snapshot
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.workspace_id == agent.workspace_id)
+        .map(|workspace| workspace.label.as_str());
+    let title = agent
+        .title
+        .as_deref()
+        .or(agent.terminal_title_stripped.as_deref())
+        .or(agent.display_agent.as_deref())
+        .or(agent.name.as_deref())
+        .or(agent.agent.as_deref())
+        .filter(|title| !title.trim().is_empty());
+    Some(match (space, title) {
+        (Some(space), Some(title)) => format!("{space} · {title}"),
+        (Some(space), None) => space.to_owned(),
+        (None, Some(title)) => title.to_owned(),
+        (None, None) => pane_id.to_owned(),
+    })
+}
+
+/// Cuts a label to `max` characters, ending it with "…".
+fn cut_label(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut cut = text.chars().take(max.saturating_sub(1)).collect::<String>();
+    cut.push('…');
+    cut
+}
+
+/// Draws the drag label one row under and right of the pointer, kept inside
+/// the screen; returns the cells it covers.
+pub(super) fn render_drag_ghost(
+    buffer: &mut ratatui::buffer::Buffer,
+    text: &str,
+    (column, row): (u16, u16),
+    palette: &crate::app::state::Palette,
+) -> Rect {
+    let area = buffer.area;
+    let width = super::render::display_width(text).min(area.width);
+    if width == 0 || area.height == 0 {
+        return Rect::default();
+    }
+    let x = column
+        .saturating_add(2)
+        .min(area.right().saturating_sub(width));
+    let y = if row.saturating_add(1) < area.bottom() {
+        row + 1
+    } else {
+        row.saturating_sub(1)
+    };
+    let rect = Rect::new(x, y, width, 1);
+    let style = ratatui::style::Style::default()
+        .fg(match palette.panel_bg {
+            ratatui::style::Color::Reset => palette.surface_dim,
+            color => color,
+        })
+        .bg(palette.accent)
+        .add_modifier(ratatui::style::Modifier::BOLD);
+    buffer.set_style(rect, style);
+    super::render::put_text(buffer, rect.x, rect.y, rect.width, text, style);
+    rect
 }

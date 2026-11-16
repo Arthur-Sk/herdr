@@ -703,6 +703,8 @@ impl ClientShellState {
                 self.hits.navigator_scroll_metrics = rendered.navigator_scroll_metrics;
                 self.hits.worktree_search = rendered.worktree_search;
                 self.hits.worktree_rows = rendered.worktree_rows;
+                self.hits.folder_choice_rows = rendered.folder_choice_rows;
+                self.hits.folder_picker_popup = rendered.folder_picker_popup;
                 self.hits.help_popup = rendered.help_popup;
                 self.hits.help_scrollbar = rendered.help_scrollbar;
                 self.hits.help_scroll_metrics = rendered.help_scroll_metrics;
@@ -734,6 +736,17 @@ impl ClientShellState {
             notes.scroll = notes
                 .scroll
                 .min(u16::try_from(self.hits.release_notes_max_scroll).unwrap_or(u16::MAX));
+        }
+        if let (Some(text), Some(pointer)) = (self.drag_ghost_text(), self.drag_pointer) {
+            let cursor = frame.cursor.clone();
+            let mut composed = frame.to_ratatui_buffer()?;
+            occlusion.cover(super::folder_actions::render_drag_ghost(
+                &mut composed,
+                &text,
+                pointer,
+                &self.config.palette,
+            ));
+            frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         if self.endpoint_status(&self.active_endpoint_id) != Some(ClientEndpointStatus::Online) {
             frame.cursor = None;

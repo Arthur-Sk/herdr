@@ -5,7 +5,7 @@
 //! public workspace and pane ids, so the server and its frozen client-shell codec
 //! know nothing about them.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -242,23 +242,27 @@ impl SidebarFolders {
         }
     }
 
-    /// Forgets spaces and agents of workspaces the server no longer has, so a
-    /// workspace id the server hands out again starts unfiled.
-    pub(super) fn prune(&mut self, snapshot: &ClientShellSnapshot) -> bool {
-        if snapshot.workspaces.is_empty() {
-            return false;
-        }
+    /// Forgets spaces and agents of workspaces seen in an earlier snapshot and
+    /// gone from this one, so a workspace id the server hands out again starts
+    /// unfiled. Ids never seen are kept: after a server restart, or a restore
+    /// that brings back fewer spaces, the layout must survive. Returns the
+    /// workspace ids of this snapshot, the next call's `seen`.
+    pub(super) fn prune(
+        &mut self,
+        snapshot: &ClientShellSnapshot,
+        seen: &HashSet<String>,
+    ) -> HashSet<String> {
         let live = snapshot
             .workspaces
             .iter()
-            .map(|workspace| workspace.workspace_id.as_str())
+            .map(|workspace| workspace.workspace_id.clone())
             .collect::<HashSet<_>>();
-        let before = (self.spaces.len(), self.agents.len());
-        self.spaces
-            .retain(|workspace_id, _| live.contains(workspace_id.as_str()));
+        let closed =
+            |workspace_id: &str| seen.contains(workspace_id) && !live.contains(workspace_id);
+        self.spaces.retain(|workspace_id, _| !closed(workspace_id));
         self.agents
-            .retain(|pane_id, _| live.contains(workspace_of_pane(pane_id)));
-        before != (self.spaces.len(), self.agents.len())
+            .retain(|pane_id, _| !closed(workspace_of_pane(pane_id)));
+        live
     }
 
     /// Folders shown in a section without a filter: those holding something
@@ -703,6 +707,72 @@ pub(super) fn space_block_root(snapshot: &ClientShellSnapshot, workspace_id: &st
     workspace_id.to_owned()
 }
 
+/// One line of the folder picker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum FolderChoice {
+    TopLevel,
+    Folder(String),
+    /// A folder named by what was typed, made on the spot.
+    New(String),
+}
+
+impl FolderChoice {
+    pub(super) fn folder(&self) -> Option<&str> {
+        match self {
+            Self::TopLevel => None,
+            Self::Folder(path) | Self::New(path) => Some(path),
+        }
+    }
+}
+
+/// Folders in tree order: each folder followed by its subfolders, by name.
+pub(super) fn folders_in_tree_order(paths: BTreeSet<String>) -> Vec<String> {
+    let mut paths = paths.into_iter().collect::<Vec<_>>();
+    paths.sort_by_key(|path| {
+        path.split('/')
+            .map(|level| (level.to_lowercase(), level.to_owned()))
+            .collect::<Vec<_>>()
+    });
+    paths
+}
+
+/// What the folder picker offers for the typed words: the top level and every
+/// folder while nothing is typed, else the folders holding every word, and a
+/// new folder named by the words unless one has that name already.
+pub(super) fn folder_choices(folders: &[String], query: &str) -> Vec<FolderChoice> {
+    let filter = SidebarFilter::new(query);
+    let mut choices = Vec::new();
+    if !filter.is_active() {
+        choices.push(FolderChoice::TopLevel);
+    }
+    choices.extend(
+        folders
+            .iter()
+            .filter(|path| filter.matches(path))
+            .map(|path| FolderChoice::Folder(path.clone())),
+    );
+    if let Some(path) = normalize_folder_path(query) {
+        if !folders
+            .iter()
+            .any(|folder| folder.eq_ignore_ascii_case(&path))
+        {
+            choices.push(FolderChoice::New(path));
+        }
+    }
+    choices
+}
+
+/// The highlighted line: the one picked with the arrows while it is still
+/// offered, else the first.
+pub(super) fn selected_choice_index(
+    choices: &[FolderChoice],
+    selected: Option<&FolderChoice>,
+) -> usize {
+    selected
+        .and_then(|selected| choices.iter().position(|choice| choice == selected))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,6 +836,46 @@ mod tests {
         assert_eq!(
             folders.all_paths().into_iter().collect::<Vec<_>>(),
             vec!["agents".to_owned(), "empty".to_owned()]
+        );
+    }
+
+    #[test]
+    fn picker_offers_folders_and_a_new_one() {
+        let folders = folders_in_tree_order(
+            ["home", "ASOUP/THEX", "ASOUP", "ASOUP/core"]
+                .map(String::from)
+                .into(),
+        );
+        assert_eq!(folders, ["ASOUP", "ASOUP/core", "ASOUP/THEX", "home"]);
+        assert_eq!(
+            folder_choices(&folders, ""),
+            [
+                FolderChoice::TopLevel,
+                FolderChoice::Folder("ASOUP".into()),
+                FolderChoice::Folder("ASOUP/core".into()),
+                FolderChoice::Folder("ASOUP/THEX".into()),
+                FolderChoice::Folder("home".into()),
+            ]
+        );
+        assert_eq!(
+            folder_choices(&folders, "thex"),
+            [
+                FolderChoice::Folder("ASOUP/THEX".into()),
+                FolderChoice::New("thex".into()),
+            ]
+        );
+        assert_eq!(
+            folder_choices(&folders, "asoup/thex"),
+            [FolderChoice::Folder("ASOUP/THEX".into())]
+        );
+        let choices = folder_choices(&folders, "o");
+        assert_eq!(
+            selected_choice_index(&choices, Some(&FolderChoice::Folder("home".into()))),
+            3
+        );
+        assert_eq!(
+            selected_choice_index(&choices, Some(&FolderChoice::TopLevel)),
+            0
         );
     }
 

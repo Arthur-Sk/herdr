@@ -712,7 +712,8 @@ impl ClientShellState {
         };
         if endpoint_id == &self.active_endpoint_id {
             if self.sidebar_has_folders() {
-                self.folders.prune(&snapshot);
+                self.folder_seen_workspaces =
+                    self.folders.prune(&snapshot, &self.folder_seen_workspaces);
             }
             self.apply_active_snapshot(snapshot, generation);
         }
