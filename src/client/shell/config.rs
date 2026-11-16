@@ -65,6 +65,7 @@ impl ClientShellState {
                 filter: self.sidebar_filter.trim().to_owned(),
                 ..self.folders.clone()
             },
+            unknown: Default::default(),
         };
         if let Err(error) = preferences::store(path, preferences) {
             self.set_endpoint_error(error);

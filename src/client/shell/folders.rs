@@ -52,6 +52,9 @@ pub(super) struct SidebarFolders {
     /// folders; agents missing here follow in their spaces' order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) agent_order: Vec<String>,
+    /// Keys a newer build wrote, kept as they are when this build saves.
+    #[serde(flatten)]
+    pub(super) unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Reads a folder path as typed: levels split on "/", blanks dropped. None is
@@ -116,6 +119,7 @@ impl SidebarFolders {
             && self.muted.is_empty()
             && self.collapsed_groups.is_empty()
             && self.agent_order.is_empty()
+            && self.unknown.is_empty()
     }
 
     pub(super) fn space_folder(&self, workspace_id: &str) -> Option<&str> {

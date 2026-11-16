@@ -6,6 +6,37 @@ use std::{
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(1);
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+/// Written by every build that keeps the keys it does not know. A file without
+/// it was last written by an older build, which rewrote it with its own keys only.
+const FORMAT_KEY: &str = "layout_format";
+const FORMAT: u64 = 1;
+
+/// Every key the builds before FORMAT could write, with the generation that
+/// added it: 0 upstream herdr, 1 fork folders (fd9bb257, 52066519), 2 folder
+/// order and filter (9f3e2ca6), 3 mute, folded groups and agent order
+/// (9241b6d3). The list is closed: later keys are written only by builds that
+/// keep unknown keys, so an older build drops them all.
+const LEGACY_KEYS: &[(&str, u8)] = &[
+    ("sidebar_width", 0),
+    ("sidebar_section_split", 0),
+    ("sidebar_collapsed", 0),
+    ("agent_panel_sort", 0),
+    ("collapsed_groups", 0),
+    ("remote_collapsed_groups", 0),
+    ("folders", 1),
+    ("folders.folders", 1),
+    ("folders.spaces", 1),
+    ("folders.agents", 1),
+    ("folders.collapsed_spaces", 1),
+    ("folders.collapsed_agents", 1),
+    ("folders.order", 2),
+    ("folders.filter", 2),
+    ("folders.muted", 3),
+    ("folders.collapsed_groups", 3),
+    ("folders.agent_order", 3),
+];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct ClientRemoteCollapsedGroups {
@@ -33,6 +64,9 @@ pub(super) struct ClientChromePreferences {
         skip_serializing_if = "super::folders::SidebarFolders::is_empty"
     )]
     pub(super) folders: super::folders::SidebarFolders,
+    /// Keys a newer build wrote, kept as they are when this build saves.
+    #[serde(flatten)]
+    pub(super) unknown: Map<String, Value>,
 }
 
 pub(super) fn path_for_local_endpoint(socket_path: &Path) -> PathBuf {
@@ -61,18 +95,109 @@ pub(super) fn path_for_remote_endpoint(target: &str, session: &str) -> PathBuf {
 }
 
 pub(super) fn load(path: &Path) -> Option<ClientChromePreferences> {
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
+    let mut saved = read_json(path)?;
+    let written_by_current_build = saved.as_object_mut()?.remove(FORMAT_KEY).is_some();
+    if !written_by_current_build {
+        if let Some(full) = read_json(&full_copy_path(path)) {
+            restore_dropped_keys(&mut saved, &full);
+        }
+    }
+    serde_json::from_value(saved).ok()
 }
 
-pub(super) fn store(path: &Path, preferences: ClientChromePreferences) -> Result<(), String> {
+pub(super) fn store(path: &Path, mut preferences: ClientChromePreferences) -> Result<(), String> {
+    // Keys this build does not know came from a newer one: keep them as the file
+    // has them now, so going back to an older build loses nothing.
+    if let Some(saved) = load(path) {
+        preferences.unknown = saved.unknown;
+        preferences.folders.unknown = saved.folders.unknown;
+    }
+    let mut value = serde_json::to_value(&preferences)
+        .map_err(|error| format!("failed to encode client shell state: {error}"))?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(FORMAT_KEY.to_owned(), FORMAT.into());
+    }
+    let content = serde_json::to_vec_pretty(&value)
+        .map_err(|error| format!("failed to encode client shell state: {error}"))?;
+    replace_file(path, &content)?;
+    // Builds older than FORMAT never touch this copy; `load` takes back from it
+    // what they dropped.
+    replace_file(&full_copy_path(path), &content)
+}
+
+/// The last layout a current build saved, beside the file itself.
+fn full_copy_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".full");
+    path.with_file_name(name)
+}
+
+fn read_json(path: &Path) -> Option<Value> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+fn legacy_generation(key: &str) -> Option<u8> {
+    LEGACY_KEYS
+        .iter()
+        .find(|(known, _)| *known == key)
+        .map(|(_, generation)| *generation)
+}
+
+/// The generation of the build that wrote `saved`, judged by the newest key in
+/// it. A key that build knew but left empty is skipped when saved, so an older
+/// build can only be mistaken for an even older one.
+fn written_generation(saved: &Map<String, Value>) -> u8 {
+    let folder_keys = saved
+        .get("folders")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|folders| folders.keys().map(|key| format!("folders.{key}")));
+    saved
+        .keys()
+        .cloned()
+        .chain(folder_keys)
+        .filter_map(|key| legacy_generation(&key))
+        .max()
+        .unwrap_or(0)
+}
+
+/// An older build rewrote `saved` with only the keys it knew. Brings back from
+/// the full copy each key that build could not have written; the keys it knew
+/// stay as it left them, cleared ones included.
+fn restore_dropped_keys(saved: &mut Value, full: &Value) {
+    let (Some(saved), Some(full)) = (saved.as_object_mut(), full.as_object()) else {
+        return;
+    };
+    let writer = written_generation(saved);
+    let dropped = |key: &str| legacy_generation(key).is_none_or(|generation| generation > writer);
+    for (key, value) in full {
+        if key == FORMAT_KEY {
+            continue;
+        }
+        match saved.get_mut(key) {
+            None if dropped(key) => {
+                saved.insert(key.clone(), value.clone());
+            }
+            Some(Value::Object(folders)) if key == "folders" => {
+                for (folder_key, folder_value) in value.as_object().into_iter().flatten() {
+                    if !folders.contains_key(folder_key)
+                        && dropped(&format!("folders.{folder_key}"))
+                    {
+                        folders.insert(folder_key.clone(), folder_value.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn replace_file(path: &Path, content: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("invalid client shell state path: {}", path.display()))?;
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create client shell state directory: {error}"))?;
-    let content = serde_json::to_vec_pretty(&preferences)
-        .map_err(|error| format!("failed to encode client shell state: {error}"))?;
     let sequence = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
     let mut temp_name = path
         .file_name()
@@ -154,7 +279,7 @@ mod tests {
         assert!(load(&path)
             .and_then(|saved| saved.sidebar_width)
             .is_some_and(|width| (20..28).contains(&width)));
-        std::fs::remove_file(path).expect("remove preferences");
+        remove_layout(&path);
     }
 
     #[test]
@@ -181,6 +306,131 @@ mod tests {
         )
         .expect("replacement preference store");
         assert_eq!(load(&path).and_then(|saved| saved.sidebar_width), Some(32));
-        std::fs::remove_file(path).expect("remove preferences");
+        remove_layout(&path);
+    }
+
+    fn layout_path(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-shell-layout-{name}-{}.json",
+            std::process::id()
+        ));
+        remove_layout(&path);
+        path
+    }
+
+    fn remove_layout(path: &Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(full_copy_path(path));
+    }
+
+    fn write_raw(path: &Path, value: serde_json::Value) {
+        std::fs::write(path, serde_json::to_vec(&value).expect("json")).expect("write layout");
+    }
+
+    fn read_raw(path: &Path) -> serde_json::Value {
+        read_json(path).expect("layout file")
+    }
+
+    fn arranged() -> ClientChromePreferences {
+        let mut folders = super::super::folders::SidebarFolders::default();
+        folders.spaces.insert("w1".into(), "A".into());
+        folders.spaces.insert("w2".into(), "A".into());
+        folders.order = vec!["A".into()];
+        folders.filter = "thex".into();
+        folders.muted.insert("A".into());
+        folders.agent_order = vec!["w1:p1".into()];
+        ClientChromePreferences {
+            sidebar_width: Some(30),
+            folders,
+            ..ClientChromePreferences::default()
+        }
+    }
+
+    #[test]
+    fn keys_from_a_newer_build_survive_a_save() {
+        let path = layout_path("newer");
+        write_raw(
+            &path,
+            serde_json::json!({
+                "layout_format": 1,
+                "sidebar_width": 24,
+                "pinned_agents": ["w1:p1"],
+                "folders": {"spaces": {"w1": "A"}, "colors": {"A": "red"}}
+            }),
+        );
+        let mut loaded = load(&path).expect("layout");
+        assert_eq!(loaded.folders.space_folder("w1"), Some("A"));
+        loaded.sidebar_width = Some(40);
+        store(&path, loaded).expect("store");
+        // A save built from scratch keeps them too: they are read from the file.
+        store(
+            &path,
+            ClientChromePreferences {
+                sidebar_width: Some(41),
+                ..ClientChromePreferences::default()
+            },
+        )
+        .expect("store");
+
+        let raw = read_raw(&path);
+        assert_eq!(raw["sidebar_width"], 41);
+        assert_eq!(raw["pinned_agents"], serde_json::json!(["w1:p1"]));
+        assert_eq!(raw["folders"]["colors"], serde_json::json!({"A": "red"}));
+        assert_eq!(raw["layout_format"], 1);
+        assert_eq!(read_raw(&full_copy_path(&path)), raw);
+        remove_layout(&path);
+    }
+
+    #[test]
+    fn keys_an_older_build_dropped_come_back_and_its_own_changes_stay() {
+        let path = layout_path("older");
+        store(&path, arranged()).expect("store");
+        // The folder order build (9f3e2ca6) rewrites the file: it moved w2 out,
+        // cleared the filter and knew nothing of mutes and agent order.
+        write_raw(
+            &path,
+            serde_json::json!({
+                "sidebar_width": 33,
+                "folders": {"spaces": {"w1": "A"}, "order": ["A"]}
+            }),
+        );
+
+        let loaded = load(&path).expect("layout");
+        assert_eq!(loaded.sidebar_width, Some(33));
+        assert_eq!(loaded.folders.space_folder("w2"), None);
+        assert_eq!(loaded.folders.filter, "");
+        assert!(loaded.folders.muted.contains("A"));
+        assert_eq!(loaded.folders.agent_order, ["w1:p1"]);
+        remove_layout(&path);
+    }
+
+    #[test]
+    fn folders_come_back_after_the_upstream_build_saved() {
+        let path = layout_path("upstream");
+        store(&path, arranged()).expect("store");
+        write_raw(&path, serde_json::json!({"sidebar_width": 28}));
+
+        let loaded = load(&path).expect("layout");
+        assert_eq!(loaded.sidebar_width, Some(28));
+        assert_eq!(loaded.folders.space_folder("w2"), Some("A"));
+        assert!(loaded.folders.muted.contains("A"));
+        assert_eq!(loaded.folders.filter, "thex");
+        remove_layout(&path);
+    }
+
+    #[test]
+    fn what_a_current_build_cleared_stays_cleared() {
+        let path = layout_path("cleared");
+        store(&path, arranged()).expect("store");
+        let mut cleared = arranged();
+        cleared.folders.muted.clear();
+        cleared.folders.filter.clear();
+        store(&path, cleared).expect("store");
+
+        let loaded = load(&path).expect("layout");
+        assert!(loaded.folders.muted.is_empty());
+        assert_eq!(loaded.folders.filter, "");
+        assert_eq!(loaded.folders.agent_order, ["w1:p1"]);
+        remove_layout(&path);
     }
 }
