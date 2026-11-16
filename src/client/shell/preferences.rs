@@ -38,14 +38,14 @@ const LEGACY_KEYS: &[(&str, u8)] = &[
     ("folders.agent_order", 3),
 ];
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub(super) struct ClientRemoteCollapsedGroups {
     pub(super) profile_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) collapsed_groups: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub(super) struct ClientChromePreferences {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) sidebar_width: Option<u16>,
@@ -105,14 +105,134 @@ pub(super) fn load(path: &Path) -> Option<ClientChromePreferences> {
     serde_json::from_value(saved).ok()
 }
 
+/// Saves `preferences` over every key this build knows, as a fresh window would.
+#[cfg(test)]
 pub(super) fn store(path: &Path, mut preferences: ClientChromePreferences) -> Result<(), String> {
+    let _lock = lock(path);
     // Keys this build does not know came from a newer one: keep them as the file
     // has them now, so going back to an older build loses nothing.
     if let Some(saved) = load(path) {
         preferences.unknown = saved.unknown;
         preferences.folders.unknown = saved.folders.unknown;
     }
-    let mut value = serde_json::to_value(&preferences)
+    write_layout(path, &preferences)
+}
+
+/// Saves a window's layout when other windows of the same endpoint may have
+/// saved theirs since: only what this window changed since `base` (its layout
+/// at its last save or reload) goes over the file as it stands now. Returns the
+/// layout saved.
+pub(super) fn store_merged(
+    path: &Path,
+    base: &ClientChromePreferences,
+    ours: ClientChromePreferences,
+) -> Result<ClientChromePreferences, String> {
+    let _lock = lock(path);
+    let merged = match load(path) {
+        Some(theirs) => merge(base, ours, theirs),
+        None => ours,
+    };
+    write_layout(path, &merged)?;
+    Ok(merged)
+}
+
+/// `ours`'s changes since `base`, laid over `theirs`. Lists of names (folds,
+/// mutes, folders) and per-id maps merge entry by entry, so two windows that
+/// changed different entries keep both; a value both changed takes `ours`.
+pub(super) fn merge(
+    base: &ClientChromePreferences,
+    ours: ClientChromePreferences,
+    theirs: ClientChromePreferences,
+) -> ClientChromePreferences {
+    ClientChromePreferences {
+        sidebar_width: pick(
+            &base.sidebar_width,
+            ours.sidebar_width,
+            theirs.sidebar_width,
+        ),
+        sidebar_section_split: pick(
+            &base.sidebar_section_split,
+            ours.sidebar_section_split,
+            theirs.sidebar_section_split,
+        ),
+        sidebar_collapsed: pick(
+            &base.sidebar_collapsed,
+            ours.sidebar_collapsed,
+            theirs.sidebar_collapsed,
+        ),
+        agent_panel_sort: pick(
+            &base.agent_panel_sort,
+            ours.agent_panel_sort,
+            theirs.agent_panel_sort,
+        ),
+        collapsed_groups: super::folders::merge_set(
+            &base.collapsed_groups.iter().cloned().collect(),
+            ours.collapsed_groups.into_iter().collect(),
+            theirs.collapsed_groups.into_iter().collect(),
+        )
+        .into_iter()
+        .collect(),
+        remote_collapsed_groups: pick(
+            &base.remote_collapsed_groups,
+            ours.remote_collapsed_groups,
+            theirs.remote_collapsed_groups,
+        ),
+        folders: super::folders::SidebarFolders::merged(
+            &base.folders,
+            ours.folders,
+            theirs.folders,
+        ),
+        unknown: theirs.unknown,
+    }
+}
+
+/// `ours` if this window changed the value since `base`, else `theirs`.
+pub(super) fn pick<T: PartialEq>(base: &T, ours: T, theirs: T) -> T {
+    if ours != *base {
+        ours
+    } else {
+        theirs
+    }
+}
+
+/// What tells a rewrite of the layout file from the last one seen: every save
+/// replaces the file, so its inode changes too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct FileStamp {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+    inode: u64,
+}
+
+pub(super) fn stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&metadata);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some(FileStamp {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+        inode,
+    })
+}
+
+/// Windows of one endpoint take turns reading, merging and writing the file.
+fn lock(path: &Path) -> Option<std::fs::File> {
+    let lock_path = sibling_path(path, ".lock");
+    std::fs::create_dir_all(lock_path.parent()?).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_path)
+        .ok()?;
+    file.lock().ok()?;
+    Some(file)
+}
+
+fn write_layout(path: &Path, preferences: &ClientChromePreferences) -> Result<(), String> {
+    let mut value = serde_json::to_value(preferences)
         .map_err(|error| format!("failed to encode client shell state: {error}"))?;
     if let Some(object) = value.as_object_mut() {
         object.insert(FORMAT_KEY.to_owned(), FORMAT.into());
@@ -125,11 +245,27 @@ pub(super) fn store(path: &Path, mut preferences: ClientChromePreferences) -> Re
     replace_file(&full_copy_path(path), &content)
 }
 
+fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+/// Removes a layout file with the copy and lock kept beside it.
+#[cfg(test)]
+pub(super) fn remove_layout_files(path: &Path) {
+    for file in [
+        path.to_path_buf(),
+        full_copy_path(path),
+        sibling_path(path, ".lock"),
+    ] {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
 /// The last layout a current build saved, beside the file itself.
 fn full_copy_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".full");
-    path.with_file_name(name)
+    sibling_path(path, ".full")
 }
 
 fn read_json(path: &Path) -> Option<Value> {
@@ -319,8 +455,7 @@ mod tests {
     }
 
     fn remove_layout(path: &Path) {
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(full_copy_path(path));
+        remove_layout_files(path);
     }
 
     fn write_raw(path: &Path, value: serde_json::Value) {
@@ -358,10 +493,18 @@ mod tests {
                 "folders": {"spaces": {"w1": "A"}, "colors": {"A": "red"}}
             }),
         );
-        let mut loaded = load(&path).expect("layout");
-        assert_eq!(loaded.folders.space_folder("w1"), Some("A"));
-        loaded.sidebar_width = Some(40);
-        store(&path, loaded).expect("store");
+        let base = load(&path).expect("layout");
+        assert_eq!(base.folders.space_folder("w1"), Some("A"));
+        let mut ours = base.clone();
+        ours.sidebar_width = Some(40);
+        ours.folders.spaces.insert("w2".into(), "A".into());
+        let saved = store_merged(&path, &base, ours).expect("store");
+        assert_eq!(saved.unknown["pinned_agents"], serde_json::json!(["w1:p1"]));
+        assert_eq!(
+            saved.folders.unknown["colors"],
+            serde_json::json!({"A": "red"})
+        );
+        assert_eq!(saved.folders.space_folder("w2"), Some("A"));
         // A save built from scratch keeps them too: they are read from the file.
         store(
             &path,
@@ -431,6 +574,53 @@ mod tests {
         assert!(loaded.folders.muted.is_empty());
         assert_eq!(loaded.folders.filter, "");
         assert_eq!(loaded.folders.agent_order, ["w1:p1"]);
+        remove_layout(&path);
+    }
+
+    #[test]
+    fn two_windows_saving_in_turn_keep_each_others_changes() {
+        let path = layout_path("windows");
+        store(&path, arranged()).expect("store");
+        let base = load(&path).expect("layout");
+
+        // The first window files w3, mutes nothing new and widens its sidebar.
+        let mut first = base.clone();
+        first.folders.spaces.insert("w3".into(), "B".into());
+        first.sidebar_width = Some(36);
+        let saved = store_merged(&path, &base, first).expect("first save");
+        assert_eq!(saved.folders.space_folder("w3"), Some("B"));
+
+        // The second window still holds the old layout: it unmutes A, moves w1
+        // out and collapses a folder. Its save keeps the first window's work.
+        let mut second = base.clone();
+        second.folders.muted.clear();
+        second.folders.spaces.remove("w1");
+        second.folders.collapsed_spaces.insert("A".into());
+        let saved = store_merged(&path, &base, second).expect("second save");
+
+        assert_eq!(saved, load(&path).expect("layout"));
+        assert_eq!(saved.sidebar_width, Some(36));
+        assert_eq!(saved.folders.space_folder("w3"), Some("B"));
+        assert_eq!(saved.folders.space_folder("w2"), Some("A"));
+        assert_eq!(saved.folders.space_folder("w1"), None);
+        assert!(saved.folders.muted.is_empty());
+        assert!(saved.folders.collapsed_spaces.contains("A"));
+        remove_layout(&path);
+    }
+
+    #[test]
+    fn hand_orders_keep_entries_another_window_added() {
+        let path = layout_path("orders");
+        store(&path, arranged()).expect("store");
+        let base = load(&path).expect("layout");
+        let mut first = base.clone();
+        first.folders.order.push("B".into());
+        store_merged(&path, &base, first).expect("first save");
+
+        let mut second = base.clone();
+        second.folders.order = vec!["C".into(), "A".into()];
+        let saved = store_merged(&path, &base, second).expect("second save");
+        assert_eq!(saved.folders.order, ["C", "A", "B"]);
         remove_layout(&path);
     }
 }

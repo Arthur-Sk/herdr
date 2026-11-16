@@ -629,7 +629,7 @@ fn folders_are_kept_in_chrome_preferences() {
     let saved = crate::client::shell::preferences::load(&path).expect("saved preferences");
     assert_eq!(saved.folders.space_folder("w2"), Some("ASOUP/THEX"));
     assert!(saved.folders.collapsed_spaces.contains("ASOUP"));
-    std::fs::remove_file(path).expect("remove preferences");
+    crate::client::shell::preferences::remove_layout_files(&path);
 
     // Nothing is written for a sidebar without folders.
     let empty = serde_json::to_string(
@@ -724,7 +724,52 @@ fn layout_view_and_filter_survive_a_restart() {
     assert_eq!(reloaded.folders.space_folder("w2"), Some("b"));
     assert!(reloaded.agents_by_priority());
     assert_eq!(reloaded.sidebar_filter, "review");
-    std::fs::remove_file(path).expect("remove preferences");
+    crate::client::shell::preferences::remove_layout_files(&path);
+}
+
+#[test]
+fn two_windows_share_their_folders_and_keep_their_own_view() {
+    let path =
+        std::env::temp_dir().join(format!("herdr-sidebar-windows-{}.json", std::process::id()));
+    crate::client::shell::preferences::remove_layout_files(&path);
+    let open_window = || {
+        let mut state = state_with(filed(&[("w2", "b")]));
+        state.config.preferences_path = Some(path.clone());
+        state
+    };
+    let mut first = open_window();
+    let mut second = open_window();
+    let start = std::time::Instant::now();
+
+    first.folders.file_space("w3", Some("c"));
+    first.persist_chrome_preferences(&mut ClientShellInput::default());
+    assert!(
+        second.tick_layout_sync(start),
+        "the second window sees the save"
+    );
+    assert_eq!(second.folders.space_folder("w3"), Some("c"));
+    assert!(!second.tick_layout_sync(start + std::time::Duration::from_secs(2)));
+
+    // The second window mutes a folder and narrows its sidebar; the first one
+    // takes the mute but keeps its own width.
+    second.folders.toggle_muted("b");
+    second.sidebar_width = 22;
+    second.sidebar_width_manual = true;
+    second.persist_chrome_preferences(&mut ClientShellInput::default());
+    let first_width = first.sidebar_width;
+    assert!(first.tick_layout_sync(start + std::time::Duration::from_secs(4)));
+    assert!(first.folders.muted.contains("b"));
+    assert_eq!(first.sidebar_width, first_width);
+
+    // A later save of the first window undoes neither the mute nor the width.
+    first.folders.toggle_collapsed(FolderSection::Spaces, "c");
+    first.persist_chrome_preferences(&mut ClientShellInput::default());
+    let saved = crate::client::shell::preferences::load(&path).expect("layout");
+    assert!(saved.folders.muted.contains("b"));
+    assert_eq!(saved.folders.space_folder("w3"), Some("c"));
+    assert!(saved.folders.collapsed_spaces.contains("c"));
+    assert_eq!(saved.sidebar_width, Some(22));
+    crate::client::shell::preferences::remove_layout_files(&path);
 }
 
 fn todo_token() -> (String, String) {

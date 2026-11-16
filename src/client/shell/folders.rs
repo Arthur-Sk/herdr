@@ -57,6 +57,82 @@ pub(super) struct SidebarFolders {
     pub(super) unknown: serde_json::Map<String, serde_json::Value>,
 }
 
+impl SidebarFolders {
+    /// `ours`'s changes since `base`, laid over `theirs` (see
+    /// `preferences::merge`): one window's folders don't undo another's.
+    pub(super) fn merged(base: &Self, ours: Self, theirs: Self) -> Self {
+        Self {
+            folders: merge_set(&base.folders, ours.folders, theirs.folders),
+            spaces: merge_map(&base.spaces, ours.spaces, theirs.spaces),
+            agents: merge_map(&base.agents, ours.agents, theirs.agents),
+            collapsed_spaces: merge_set(
+                &base.collapsed_spaces,
+                ours.collapsed_spaces,
+                theirs.collapsed_spaces,
+            ),
+            collapsed_agents: merge_set(
+                &base.collapsed_agents,
+                ours.collapsed_agents,
+                theirs.collapsed_agents,
+            ),
+            order: merge_order(&base.order, ours.order, theirs.order),
+            filter: super::preferences::pick(&base.filter, ours.filter, theirs.filter),
+            muted: merge_set(&base.muted, ours.muted, theirs.muted),
+            collapsed_groups: merge_set(
+                &base.collapsed_groups,
+                ours.collapsed_groups,
+                theirs.collapsed_groups,
+            ),
+            agent_order: merge_order(&base.agent_order, ours.agent_order, theirs.agent_order),
+            unknown: theirs.unknown,
+        }
+    }
+}
+
+/// `theirs` with what `ours` added since `base` and without what it removed.
+pub(super) fn merge_set(
+    base: &BTreeSet<String>,
+    ours: BTreeSet<String>,
+    mut theirs: BTreeSet<String>,
+) -> BTreeSet<String> {
+    for removed in base.difference(&ours) {
+        theirs.remove(removed);
+    }
+    theirs.extend(ours.difference(base).cloned());
+    theirs
+}
+
+fn merge_map(
+    base: &BTreeMap<String, String>,
+    ours: BTreeMap<String, String>,
+    mut theirs: BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    for key in base.keys().filter(|key| !ours.contains_key(*key)) {
+        theirs.remove(key);
+    }
+    for (key, value) in ours {
+        if base.get(&key) != Some(&value) {
+            theirs.insert(key, value);
+        }
+    }
+    theirs
+}
+
+/// A hand order this window rearranged wins; entries only the other window
+/// added follow it.
+fn merge_order(base: &[String], ours: Vec<String>, theirs: Vec<String>) -> Vec<String> {
+    if ours == base {
+        return theirs;
+    }
+    let mut merged = ours;
+    for entry in theirs {
+        if !base.contains(&entry) && !merged.contains(&entry) {
+            merged.push(entry);
+        }
+    }
+    merged
+}
+
 /// Reads a folder path as typed: levels split on "/", blanks dropped. None is
 /// the top level.
 pub(super) fn normalize_folder_path(input: &str) -> Option<String> {

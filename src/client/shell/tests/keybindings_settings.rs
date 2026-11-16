@@ -236,7 +236,7 @@ fn manual_client_chrome_preferences_round_trip_per_endpoint() {
     let stored_again = std::fs::read_to_string(&path).expect("restored client chrome preferences");
     assert!(stored_again.contains(profile.id.as_str()));
     assert!(stored_again.contains("/repo"));
-    std::fs::remove_file(path).expect("remove client chrome preferences");
+    crate::client::shell::preferences::remove_layout_files(&path);
 }
 
 #[test]

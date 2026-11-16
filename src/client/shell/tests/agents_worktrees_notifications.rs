@@ -1019,7 +1019,7 @@ fn agent_sort_toggle_is_client_local_and_persists_per_endpoint() {
         crate::config::AgentPanelSortConfig::Priority
     );
     assert!(reloaded.agent_panel_sort_manual);
-    std::fs::remove_file(path).expect("remove agent sort preferences");
+    crate::client::shell::preferences::remove_layout_files(&path);
 }
 
 #[test]

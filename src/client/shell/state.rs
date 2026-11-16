@@ -1045,6 +1045,13 @@ pub(crate) struct ClientShellState {
     /// Workspace ids of the last snapshot: folders forget only spaces seen
     /// closing, never ones a restart has not brought back yet.
     pub(super) folder_seen_workspaces: HashSet<String>,
+    /// This window's layout as of its last save or reload of the layout file:
+    /// what differs from it now is this window's own change, the rest of the
+    /// file other windows of the endpoint may have changed.
+    pub(super) layout_base: Option<preferences::ClientChromePreferences>,
+    /// The layout file as last read, and when to look at it again.
+    pub(super) layout_stamp: Option<preferences::FileStamp>,
+    pub(super) layout_next_check: Option<std::time::Instant>,
     pub(super) folder_press: Option<ClientFolderPress>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
@@ -1194,7 +1201,7 @@ impl ClientShellState {
                 .or_default()
                 .extend(saved.collapsed_groups);
         }
-        Self {
+        let mut state = Self {
             machine_diagnostics: Default::default(),
             config,
             snapshot: None,
@@ -1226,6 +1233,9 @@ impl ClientShellState {
             agent_press: None,
             drag_pointer: None,
             folder_seen_workspaces: HashSet::new(),
+            layout_base: None,
+            layout_stamp: None,
+            layout_next_check: None,
             folder_press: None,
             workspace_scroll: 0,
             agent_scroll: 0,
@@ -1298,7 +1308,14 @@ impl ClientShellState {
             endpoint_error: None,
             endpoint_error_deadline: None,
             dismissed_product_announcement: None,
-        }
+        };
+        state.layout_base = Some(state.chrome_preferences());
+        state.layout_stamp = state
+            .config
+            .preferences_path
+            .as_deref()
+            .and_then(preferences::stamp);
+        state
     }
 
     pub(super) fn resume_mobile_switcher_if_ready(&mut self) -> bool {

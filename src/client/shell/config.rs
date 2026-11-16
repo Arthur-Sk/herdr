@@ -26,10 +26,8 @@ impl ClientShellState {
         );
     }
 
-    pub(super) fn persist_chrome_preferences(&mut self, outcome: &mut ClientShellInput) {
-        let Some(path) = self.config.preferences_path.as_deref() else {
-            return;
-        };
+    /// The layout as this window holds it, in the shape the file keeps.
+    pub(super) fn chrome_preferences(&self) -> preferences::ClientChromePreferences {
         let mut collapsed_groups = self.collapsed_groups.iter().cloned().collect::<Vec<_>>();
         collapsed_groups.sort();
         let mut remote_collapsed_groups = self
@@ -48,7 +46,7 @@ impl ClientShellState {
             })
             .collect::<Vec<_>>();
         remote_collapsed_groups.sort_by(|left, right| left.profile_id.cmp(&right.profile_id));
-        let preferences = preferences::ClientChromePreferences {
+        preferences::ClientChromePreferences {
             sidebar_width: self.sidebar_width_manual.then_some(self.sidebar_width),
             sidebar_section_split: self
                 .sidebar_section_split_manual
@@ -66,11 +64,75 @@ impl ClientShellState {
                 ..self.folders.clone()
             },
             unknown: Default::default(),
-        };
-        if let Err(error) = preferences::store(path, preferences) {
-            self.set_endpoint_error(error);
-            outcome.repaint = true;
         }
+    }
+
+    /// Saves this window's changes over what other windows of the endpoint
+    /// saved meanwhile, and takes their folders in.
+    pub(super) fn persist_chrome_preferences(&mut self, outcome: &mut ClientShellInput) {
+        let Some(path) = self.config.preferences_path.clone() else {
+            return;
+        };
+        let base = self.layout_base.clone().unwrap_or_default();
+        match preferences::store_merged(&path, &base, self.chrome_preferences()) {
+            Ok(saved) => {
+                outcome.repaint |= self.adopt_layout_folders(saved.folders);
+                self.layout_base = Some(self.chrome_preferences());
+            }
+            Err(error) => {
+                self.set_endpoint_error(error);
+                outcome.repaint = true;
+            }
+        }
+    }
+
+    /// Picks up the folders another window of this endpoint saved, looking at
+    /// the layout file at most once a second. Width, view and filter stay this
+    /// window's own until it is restarted.
+    pub(crate) fn tick_layout_sync(&mut self, now: std::time::Instant) -> bool {
+        let Some(path) = self.config.preferences_path.clone() else {
+            return false;
+        };
+        if self.layout_next_check.is_some_and(|at| now < at) {
+            return false;
+        }
+        self.layout_next_check = Some(now + std::time::Duration::from_secs(1));
+        let stamp = preferences::stamp(&path);
+        if stamp == self.layout_stamp {
+            return false;
+        }
+        self.layout_stamp = stamp;
+        let Some(theirs) = preferences::load(&path) else {
+            return false;
+        };
+        let mut base = self.layout_base.clone().unwrap_or_default();
+        let ours = self.chrome_preferences();
+        // A change of this window's not saved yet stays on top, and stays its
+        // own for the next save.
+        let folders = super::folders::SidebarFolders::merged(
+            &base.folders,
+            ours.folders,
+            theirs.folders.clone(),
+        );
+        base.folders = super::folders::SidebarFolders {
+            filter: base.folders.filter.clone(),
+            ..theirs.folders
+        };
+        self.layout_base = Some(base);
+        self.adopt_layout_folders(folders)
+    }
+
+    /// Takes in saved folders, keeping this window's own filter.
+    fn adopt_layout_folders(&mut self, folders: super::folders::SidebarFolders) -> bool {
+        let folders = super::folders::SidebarFolders {
+            filter: self.folders.filter.clone(),
+            ..folders
+        };
+        if folders == self.folders {
+            return false;
+        }
+        self.folders = folders;
+        true
     }
 
     pub(crate) fn reload_client_config(&mut self) {
@@ -546,7 +608,7 @@ mod tests {
         let initial = config.initial_surface_size(100, 30);
         let state = ClientShellState::new(config);
         assert_eq!(initial, state.surface_size(100, 30));
-        std::fs::remove_file(path).expect("remove endpoint chrome");
+        preferences::remove_layout_files(&path);
     }
 
     #[test]
