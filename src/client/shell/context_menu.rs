@@ -1,5 +1,8 @@
 use super::*;
 
+pub(super) const REMIND_TITLE: &str = "remind me in: 30m, 2h, 1h30m, 1d or 18:00";
+pub(super) const REMIND_RETRY_TITLE: &str = "can't read that; try 30m, 2h, 1h30m, 1d or 18:00";
+
 impl ClientContextMenuOverlay {
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
         use ClientContextMenuAction as Action;
@@ -54,11 +57,15 @@ impl ClientContextMenuOverlay {
                 source_pane_id,
                 has_manual_label,
                 right_click_passthrough,
+                todo,
                 ..
             } => {
                 let mut items = vec![item("Rename pane", Action::RenamePane)];
                 if *has_manual_label {
                     items.push(item("Clear pane name", Action::ClearPaneName));
+                }
+                if let Some(todo) = todo {
+                    items.extend(todo_items(*todo));
                 }
                 if source_pane_id.is_some() {
                     items.push(item("Swap with focused pane", Action::SwapWithFocusedPane));
@@ -79,8 +86,27 @@ impl ClientContextMenuOverlay {
                 ]);
                 items
             }
+            ClientContextMenuTarget::Agent { todo, .. } => todo_items(*todo),
         }
     }
+}
+
+fn todo_items(todo: PaneTodoMenu) -> Vec<ClientContextMenuItem> {
+    use ClientContextMenuAction as Action;
+
+    let item = |label, action| ClientContextMenuItem { label, action };
+    let mut items = vec![if todo.marked {
+        item("Mark as done", Action::MarkTodoDone)
+    } else {
+        item("Mark as TODO", Action::MarkTodo)
+    }];
+    if todo.reminder {
+        items.push(item("Change reminder...", Action::RemindMe));
+        items.push(item("Cancel reminder", Action::CancelReminder));
+    } else {
+        items.push(item("Remind me in...", Action::RemindMe));
+    }
+    items
 }
 
 impl ClientShellState {
@@ -153,18 +179,58 @@ impl ClientShellState {
             .focused_pane_id
             .clone()
             .filter(|focused| focused != &pane_id);
+        let todo = self.pane_todo_menu(&pane_id);
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Pane {
-                pane_id,
                 workspace_id: pane.workspace_id.clone(),
                 source_pane_id,
                 has_manual_label: pane.label.is_some(),
                 right_click_passthrough: pane.right_click_passthrough,
+                todo,
+                pane_id,
             },
             x,
             y,
             highlighted: 0,
         }));
+    }
+
+    /// Opens the TODO menu of an agent row. Returns false when the active server
+    /// does not offer TODO marks, so the click falls through.
+    pub(super) fn open_agent_context_menu(&mut self, pane_id: String, x: u16, y: u16) -> bool {
+        let Some(todo) = self.pane_todo_menu(&pane_id) else {
+            return false;
+        };
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Agent { pane_id, todo },
+            x,
+            y,
+            highlighted: 0,
+        }));
+        true
+    }
+
+    fn pane_todo_menu(&self, pane_id: &str) -> Option<PaneTodoMenu> {
+        let supported = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(|endpoint| endpoint.methods.as_ref())
+            .is_some_and(|methods| methods.iter().any(|method| method == "pane.todo.set"));
+        if !supported {
+            return None;
+        }
+        let agent = self
+            .snapshot
+            .as_deref()?
+            .agents
+            .iter()
+            .find(|agent| agent.pane_id == pane_id)?;
+        let has_token = |name: &str| agent.tokens.iter().any(|(key, _)| key == name);
+        Some(PaneTodoMenu {
+            marked: has_token(crate::pane_todo::TODO_TOKEN),
+            reminder: has_token(crate::pane_todo::REMIND_AT_TOKEN),
+        })
     }
 
     pub(super) fn move_context_menu_selection(&mut self, delta: isize) {
@@ -201,6 +267,20 @@ impl ClientShellState {
                 tab_id,
                 workspace_id,
             } => self.activate_tab_context_action(tab_id, workspace_id, action, outcome),
+            ClientContextMenuTarget::Agent { pane_id, .. } => {
+                self.activate_pane_todo_action(pane_id, action, outcome)
+            }
+            ClientContextMenuTarget::Pane { pane_id, .. }
+                if matches!(
+                    action,
+                    ClientContextMenuAction::MarkTodo
+                        | ClientContextMenuAction::MarkTodoDone
+                        | ClientContextMenuAction::RemindMe
+                        | ClientContextMenuAction::CancelReminder
+                ) =>
+            {
+                self.activate_pane_todo_action(pane_id, action, outcome)
+            }
             ClientContextMenuTarget::Pane {
                 pane_id,
                 workspace_id,
@@ -217,6 +297,37 @@ impl ClientShellState {
             ),
         }
         outcome.repaint = true;
+    }
+
+    fn activate_pane_todo_action(
+        &mut self,
+        pane_id: String,
+        action: ClientContextMenuAction,
+        outcome: &mut ClientShellInput,
+    ) {
+        let set = |pane_id, todo, remind_at| {
+            crate::api::schema::Method::PaneTodoSet(crate::api::schema::PaneTodoSetParams {
+                pane_id,
+                todo,
+                remind_at,
+            })
+        };
+        match action {
+            ClientContextMenuAction::MarkTodo | ClientContextMenuAction::CancelReminder => {
+                self.push_endpoint_method(set(pane_id, true, None), outcome)
+            }
+            ClientContextMenuAction::MarkTodoDone => {
+                self.push_endpoint_method(set(pane_id, false, None), outcome)
+            }
+            ClientContextMenuAction::RemindMe => {
+                self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+                    title: REMIND_TITLE,
+                    input: TextEditor::new("1h", true),
+                    target: ClientRenameTarget::Reminder { pane_id },
+                }));
+            }
+            _ => {}
+        }
     }
 
     fn activate_workspace_context_action(

@@ -13,8 +13,8 @@ use crate::api::schema::{
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams,
     PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
-    PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneTarget, PaneTextPoint, PaneTextRange, PaneTodoSetParams, PaneZoomMode, PaneZoomParams,
+    PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -1506,6 +1506,32 @@ impl App {
         self.state.mark_session_dirty();
         let pane = self.pane_info(ws_idx, pane_id).unwrap();
 
+        encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
+    pub(super) fn handle_pane_todo_set(&mut self, id: String, params: PaneTodoSetParams) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.terminal_id(pane_id))
+            .cloned()
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        terminal.todo = params.todo.then_some(crate::terminal::TerminalTodo {
+            remind_at: params.remind_at,
+        });
+        self.state.mark_session_dirty();
+        self.sync_todo_reminder_due();
+        self.emit_pane_updated(ws_idx, pane_id);
+        let pane = self.pane_info(ws_idx, pane_id).unwrap();
         encode_success(id, ResponseResult::PaneInfo { pane })
     }
 

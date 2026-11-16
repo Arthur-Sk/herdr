@@ -226,6 +226,19 @@ pub(crate) use unix_common::{
     classify_child_exit, poll_fd_readable, read_fd, shared_ssh_control_path,
 };
 
+/// A desktop notification that should stay until dismissed, such as a reminder
+/// the person set. Platforms without such a level show a normal notification.
+pub(crate) fn show_reminder_notification(title: &str, body: Option<&str>) -> std::io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::show_reminder_notification(title, body)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        show_desktop_notification(title, body)
+    }
+}
+
 // Tests inject their own probe because the recorded hangup is process-global.
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) fn server_hangup_is_recent() -> bool {

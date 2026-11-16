@@ -356,6 +356,25 @@ crate::cli::projection::cli_params! {
     }
 }
 
+fn default_todo() -> bool {
+    true
+}
+
+crate::cli::projection::cli_params! {
+    /// Marks a pane's agent TODO, optionally with a reminder, or marks it done.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneTodoSetParams => PaneTodoProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        /// False marks the TODO done, which also drops its reminder.
+        #[serde(default = "default_todo")]
+        pub todo: bool => Field::new(true).input(binding::boolean("done", false)),
+        /// When to remind, in Unix seconds. It replaces an earlier reminder;
+        /// omitted, the mark has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub remind_at: Option<u64> => binding::remind_at(),
+    }
+}
+
 crate::cli::projection::cli_params! {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
     pub struct PaneSendTextParams => PaneSendTextProjection {

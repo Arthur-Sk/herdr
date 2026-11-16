@@ -320,6 +320,13 @@ mod tests {
                 json!({"pane_id": "pane"}),
             ),
             (
+                "todo",
+                vec!["pane", "--done"],
+                "cli:pane:todo",
+                "pane.todo.set",
+                json!({"pane_id": "pane", "todo": false}),
+            ),
+            (
                 "input",
                 vec!["pane", "--right-click", "herdr"],
                 "cli:pane:input:set",
@@ -925,6 +932,35 @@ mod tests {
             panic!()
         };
         assert_eq!(params.label, None);
+    }
+
+    #[test]
+    fn pane_todo_marks_reminds_and_clears() {
+        let Method::PaneTodoSet(params) = request("todo", &["w1:p2"]).unwrap().method else {
+            panic!()
+        };
+        assert_eq!(params.pane_id, "w1:p2");
+        assert!(params.todo);
+        assert_eq!(params.remind_at, None);
+
+        let before = crate::pane_todo::unix_now();
+        let Method::PaneTodoSet(params) = request("todo", &["w1:p2", "--remind", "30m"])
+            .unwrap()
+            .method
+        else {
+            panic!()
+        };
+        let remind_at = params.remind_at.unwrap();
+        assert!((before + 1800..=crate::pane_todo::unix_now() + 1800).contains(&remind_at));
+
+        let Method::PaneTodoSet(params) = request("todo", &["w1:p2", "--done"]).unwrap().method
+        else {
+            panic!()
+        };
+        assert!(!params.todo);
+
+        assert!(request("todo", &["w1:p2", "--remind", "soon"]).is_err());
+        assert!(request("todo", &["w1:p2", "--done", "--remind", "1h"]).is_err());
     }
 
     #[test]

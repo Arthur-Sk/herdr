@@ -19,6 +19,8 @@ mod creation;
 mod custom_commands;
 mod git_refresh;
 mod ids;
+mod pane_todo;
+pub(crate) use pane_todo::DueTodoReminder;
 mod popup;
 mod runtime;
 mod session;
@@ -139,6 +141,8 @@ pub struct App {
     pub(crate) update_manifest_check_enabled: bool,
     pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
     pub(crate) agent_metadata_deadline: Option<Instant>,
+    /// Earliest pending pane TODO reminder, in Unix seconds.
+    pub(crate) todo_reminder_due: Option<u64>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
     pub(crate) pending_host_appearance_deadline: Option<Instant>,
     pane_host_appearance: Option<crate::terminal_theme::HostAppearance>,
@@ -653,6 +657,7 @@ impl App {
             update_manifest_check_enabled: config.update.manifest_check,
             loaded_host_cursor: config.ui.host_cursor,
             agent_metadata_deadline: None,
+            todo_reminder_due: None,
             pending_agent_resume_deadline: None,
             pending_host_appearance_deadline: None,
             pane_host_appearance: None,
@@ -693,6 +698,7 @@ impl App {
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
         app.refresh_restored_workspace_git_metadata();
+        app.sync_todo_reminder_due();
         Ok(app)
     }
 
@@ -756,6 +762,7 @@ impl App {
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
         app.refresh_restored_workspace_git_metadata();
+        app.sync_todo_reminder_due();
         Ok(app)
     }
 

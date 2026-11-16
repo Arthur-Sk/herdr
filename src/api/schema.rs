@@ -117,6 +117,7 @@ operations::define_operations! {
     PaneLinkActivate(PaneLinkActivateParams) => "pane.link.activate", false, true;
     PaneLinkResolve(PaneLinkActivateParams) => "pane.link.resolve", false, true;
     PaneRename(PaneRenameParams) => "pane.rename", true, true;
+    PaneTodoSet(PaneTodoSetParams) => "pane.todo.set", true, true;
     PaneSendText(PaneSendTextParams) => "pane.send_text", false, false;
     PaneSendKeys(PaneSendKeysParams) => "pane.send_keys", false, false;
     PaneSendInput(PaneSendInputParams) => "pane.send_input", false, false;

@@ -3376,6 +3376,16 @@ impl HeadlessServer {
             changed = true;
         }
 
+        if self.app.todo_reminder_due.is_some() {
+            let reminders = self
+                .app
+                .take_due_todo_reminders(crate::pane_todo::unix_now());
+            if !reminders.is_empty() {
+                show_todo_reminders(reminders);
+                changed = true;
+            }
+        }
+
         changed |= self.app.release_host_appearance_if_ready(now);
         changed |= self.app.handle_tab_bar_status_tasks(now);
 
@@ -3388,6 +3398,22 @@ impl HeadlessServer {
                 .start_pending_agent_resumes(now, self.app.pending_agent_resume_due(now));
         }
         changed
+    }
+}
+
+fn show_todo_reminders(reminders: Vec<crate::app::DueTodoReminder>) {
+    // notify-send waits for the notification daemon; keep it off the server loop.
+    if let Err(err) = crate::thread_spawn::spawn_named("herdr-todo-reminder", move || {
+        for reminder in reminders {
+            tracing::info!(title = %reminder.title, "todo reminder due");
+            if let Err(err) =
+                crate::platform::show_reminder_notification(&reminder.title, Some(&reminder.body))
+            {
+                tracing::warn!(err = %err, "failed to show todo reminder");
+            }
+        }
+    }) {
+        tracing::warn!(err = %err, "failed to spawn todo reminder thread");
     }
 }
 

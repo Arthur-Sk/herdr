@@ -254,6 +254,11 @@ mod tests {
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
         );
+        // Fork-only method: pane TODO marks.
+        assert_eq!(
+            actual.remove("pane.todo.set").as_deref(),
+            Some("2acaf85740555ca212ee7b22d55bdde7ee26218db144fcb9d4fce2d72bf41eaa")
+        );
 
         assert_eq!(
             actual, expected,

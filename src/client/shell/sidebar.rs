@@ -145,7 +145,16 @@ pub(crate) fn render_collapsed_sidebar(
             detail_content.width,
             1,
         );
-        if agent.focused {
+        let todo = agent
+            .tokens
+            .iter()
+            .any(|(key, _)| key == crate::pane_todo::TODO_TOKEN);
+        if todo {
+            buffer.set_style(
+                rect,
+                Style::default().bg(super::agent_sidebar::todo_row_bg(palette, agent.focused)),
+            );
+        } else if agent.focused {
             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
         }
         put_text(
@@ -154,11 +163,17 @@ pub(crate) fn render_collapsed_sidebar(
             rect.y,
             rect.width.min(2),
             &format!("{:<2}", index + 1),
-            Style::default().fg(if agent.focused {
-                palette.text
+            if todo {
+                Style::default()
+                    .fg(palette.mauve)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                palette.overlay0
-            }),
+                Style::default().fg(if agent.focused {
+                    palette.text
+                } else {
+                    palette.overlay0
+                })
+            },
         );
         put_text(
             buffer,

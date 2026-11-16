@@ -315,6 +315,9 @@ pub(super) enum ClientRenameTarget {
     Pane {
         pane_id: String,
     },
+    Reminder {
+        pane_id: String,
+    },
 }
 
 #[derive(Debug)]
@@ -525,6 +528,18 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    MarkTodo,
+    MarkTodoDone,
+    RemindMe,
+    CancelReminder,
+}
+
+/// What a context menu knows about a pane's TODO mark, present only when the
+/// pane runs an agent and the server offers `pane.todo.set`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PaneTodoMenu {
+    pub(super) marked: bool,
+    pub(super) reminder: bool,
 }
 
 #[derive(Debug)]
@@ -547,6 +562,11 @@ pub(super) enum ClientContextMenuTarget {
         source_pane_id: Option<String>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+        todo: Option<PaneTodoMenu>,
+    },
+    Agent {
+        pane_id: String,
+        todo: PaneTodoMenu,
     },
 }
 

@@ -15,6 +15,56 @@ pub(super) struct AgentRow {
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
+    /// Set while the person has marked this agent TODO.
+    pub(super) todo: Option<AgentRowTodo>,
+}
+
+pub(super) struct AgentRowTodo {
+    /// The pending reminder, already formatted in local time.
+    pub(super) reminder: Option<String>,
+}
+
+/// Reads the TODO mark the server sends as reserved agent tokens.
+pub(super) fn agent_todo(agent: &crate::protocol::ClientShellAgent) -> Option<AgentRowTodo> {
+    let token = |name: &str| {
+        agent
+            .tokens
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    token(crate::pane_todo::TODO_TOKEN)?;
+    let reminder = token(crate::pane_todo::REMIND_AT_TOKEN)
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|at| {
+            crate::pane_todo::format_remind_at(
+                at,
+                crate::pane_todo::unix_now(),
+                crate::pane_todo::cached_local_utc_offset_secs(),
+            )
+        });
+    Some(AgentRowTodo { reminder })
+}
+
+/// Background of a TODO row: the palette's mauve mixed into the sidebar
+/// background, stronger on the focused row.
+pub(super) fn todo_row_bg(palette: &Palette, focused: bool) -> ratatui::style::Color {
+    use ratatui::style::Color;
+
+    let base = [palette.sidebar_bg, palette.panel_bg]
+        .into_iter()
+        .find_map(|color| match color {
+            Color::Rgb(r, g, b) => Some((r, g, b)),
+            _ => None,
+        })
+        .unwrap_or((30, 30, 46));
+    let Color::Rgb(r, g, b) = palette.mauve else {
+        return palette.surface1;
+    };
+    let amount = if focused { 0.40 } else { 0.24 };
+    let mix =
+        |from: u8, to: u8| (f32::from(from) + (f32::from(to) - f32::from(from)) * amount) as u8;
+    Color::Rgb(mix(base.0, r), mix(base.1, g), mix(base.2, b))
 }
 
 pub(super) fn ordered_agent_pane_ids(
@@ -315,6 +365,7 @@ pub(super) fn agent_row(
         status: agent.agent_status,
         focused: agent.focused,
         rows,
+        todo: agent_todo(agent),
     })
 }
 
@@ -325,7 +376,9 @@ pub(super) fn render_agent_row(
     config: &ClientShellConfig,
 ) {
     let palette = &config.palette;
-    let row_style = if row.focused {
+    let row_style = if row.todo.is_some() {
+        Style::default().bg(todo_row_bg(palette, row.focused))
+    } else if row.focused {
         Style::default().bg(palette.active_row_bg)
     } else {
         Style::default()
@@ -353,8 +406,20 @@ pub(super) fn render_agent_row(
     } else {
         row.rows.clone()
     };
-    for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
+    let line_count = rows.len().min(rect.height as usize);
+    let reminder = row
+        .todo
+        .as_ref()
+        .and_then(|todo| todo.reminder.as_deref())
+        .map(|reminder| format!("◷ {reminder} "));
+    for (index, tokens) in rows.iter().take(line_count).enumerate() {
         let indent = if index == 0 { 1 } else { 3 };
+        // The reminder sits at the right end of the last line.
+        let badge = reminder
+            .as_deref()
+            .filter(|_| index + 1 == line_count)
+            .filter(|badge| display_width(badge) + indent + 4 <= rect.width as usize);
+        let badge_width = badge.map_or(0, display_width) as u16;
         let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
         spans.extend(crate::ui::resolved_token_spans(
             tokens,
@@ -364,12 +429,27 @@ pub(super) fn render_agent_row(
             secondary,
             secondary,
             palette,
-            rect.width.saturating_sub(indent as u16) as usize,
+            rect.width.saturating_sub(indent as u16 + badge_width) as usize,
         ));
-        Paragraph::new(Line::from(spans)).style(row_style).render(
-            Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
-            buffer,
-        );
+        let y = rect.y + index as u16;
+        Paragraph::new(Line::from(spans))
+            .style(row_style)
+            .render(Rect::new(rect.x, y, rect.width, 1), buffer);
+        if row.todo.is_none() {
+            continue;
+        }
+        let mark = row_style.fg(palette.mauve).add_modifier(Modifier::BOLD);
+        put_text(buffer, rect.x, y, 1, "▌", mark);
+        if let Some(badge) = badge {
+            put_text(
+                buffer,
+                rect.right().saturating_sub(badge_width),
+                y,
+                badge_width,
+                badge,
+                mark,
+            );
+        }
     }
 }
 

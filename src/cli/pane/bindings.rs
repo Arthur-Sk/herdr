@@ -197,6 +197,21 @@ pub(crate) fn label() -> Field<Option<String>> {
         }))
 }
 
+pub(crate) fn remind_at() -> Field<Option<u64>> {
+    Field::new(None).input(
+        Input::value("remind", "WHEN", |slot, value| {
+            let now = crate::pane_todo::unix_now();
+            let offset = crate::pane_todo::local_utc_offset_secs();
+            *slot = Some(
+                crate::pane_todo::parse_remind_at(value, now, offset).map_err(ParseError::Usage)?,
+            );
+            Ok(())
+        })
+        .help("Remind after a delay (30m, 2h, 1h30m, 1d) or at a local time (18:00)")
+        .configure(|arg| arg.conflicts_with("done")),
+    )
+}
+
 pub(crate) fn read_source(include_detection: bool) -> Input<ReadSource> {
     Input::value("source", "SOURCE", |slot, value| {
         *slot = parse_choice(READ_SOURCES, "read source", value)?;
@@ -594,6 +609,14 @@ pub(super) const LEAVES: &[Leaf] = &[
         Json,
         PaneRenameProjection,
         PaneRename
+    ),
+    leaf!(
+        "todo",
+        "Mark a pane's agent TODO, with an optional reminder, or --done",
+        "cli:pane:todo",
+        Json,
+        PaneTodoProjection,
+        PaneTodoSet
     ),
     Leaf {
         name: "input",

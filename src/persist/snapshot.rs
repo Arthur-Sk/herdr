@@ -111,6 +111,23 @@ pub struct PaneSnapshot {
     pub agent_resume: Option<PaneAgentResumeSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo: Option<PaneTodoSnapshot>,
+}
+
+/// A pane's TODO mark; see `TerminalTodo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneTodoSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remind_at: Option<u64>,
+}
+
+impl From<PaneTodoSnapshot> for crate::terminal::TerminalTodo {
+    fn from(todo: PaneTodoSnapshot) -> Self {
+        Self {
+            remind_at: todo.remind_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,6 +367,11 @@ fn capture_tab(
             })
             .unwrap_or_default();
         let launch_argv = terminal.and_then(|terminal| terminal.launch_argv.clone());
+        let todo = terminal
+            .and_then(|terminal| terminal.todo)
+            .map(|todo| PaneTodoSnapshot {
+                remind_at: todo.remind_at,
+            });
         let agent_session = terminal.and_then(|terminal| {
             if let Some(authority) = terminal.hook_authority.as_ref() {
                 if let Some(session_ref) = authority.session_ref.as_ref() {
@@ -388,6 +410,7 @@ fn capture_tab(
                 agent_session,
                 agent_resume,
                 launch_argv,
+                todo,
             },
         );
     }
@@ -516,6 +539,23 @@ pub(super) fn snapshot_file_version(content: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pane_todo_marks_persist_and_old_snapshots_still_load() {
+        let pane: PaneSnapshot =
+            serde_json::from_str(r#"{"cwd":"/tmp","todo":{"remind_at":1794823200}}"#).unwrap();
+        assert_eq!(
+            pane.todo,
+            Some(PaneTodoSnapshot {
+                remind_at: Some(1_794_823_200)
+            })
+        );
+        let pane: PaneSnapshot = serde_json::from_str(r#"{"cwd":"/tmp","todo":{}}"#).unwrap();
+        assert_eq!(pane.todo, Some(PaneTodoSnapshot { remind_at: None }));
+        let pane: PaneSnapshot = serde_json::from_str(r#"{"cwd":"/tmp"}"#).unwrap();
+        assert_eq!(pane.todo, None);
+        assert!(!serde_json::to_string(&pane).unwrap().contains("todo"));
+    }
+
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -707,6 +747,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                todo: None,
             },
         );
         panes.insert(
@@ -719,6 +760,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                todo: None,
             },
         );
 
@@ -1405,6 +1447,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                todo: None,
             },
         );
         panes.insert(
@@ -1419,6 +1462,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                todo: None,
             },
         );
 

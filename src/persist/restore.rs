@@ -450,6 +450,7 @@ fn unavailable_restored_terminal(
     terminal.restore_error = Some(reason);
     if let Some(pane) = pane {
         terminal.manual_label = pane.label.clone();
+        terminal.todo = pane.todo.map(Into::into);
         terminal.launch_argv = pane.launch_argv.clone();
         if let Some(session) = restored_terminal_agent_session(pane.agent_session.as_ref(), false) {
             terminal.set_persisted_agent_session(session);
@@ -533,6 +534,7 @@ fn restore_tab(
         }
 
         let saved_label = saved_pane.and_then(|p| p.label.clone());
+        let saved_todo = saved_pane.and_then(|p| p.todo).map(Into::into);
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
         let saved_managed_agent = saved_pane
             .and_then(|pane| pane.managed_agent_kind.as_deref())
@@ -596,6 +598,7 @@ fn restore_tab(
             if let Some(label) = saved_label {
                 terminal.set_manual_label(label);
             }
+            terminal.todo = saved_todo;
             if let Some(session) = restored_agent_session {
                 terminal.set_persisted_agent_session(session);
             }
@@ -696,6 +699,7 @@ fn restore_tab(
                 if let Some(label) = saved_label {
                     terminal.set_manual_label(label);
                 }
+                terminal.todo = saved_todo;
                 if let Some(session) = restored_agent_session {
                     terminal.set_persisted_agent_session(session);
                 }
@@ -1554,6 +1558,7 @@ mod tests {
                             }),
                             agent_resume: None,
                             launch_argv: None,
+                            todo: None,
                         },
                     )]),
                     zoomed: false,
@@ -1636,6 +1641,7 @@ mod tests {
                                 agent_session: None,
                                 agent_resume: None,
                                 launch_argv: None,
+                                todo: None,
                             },
                         ),
                         (
@@ -1648,6 +1654,7 @@ mod tests {
                                 agent_session: None,
                                 agent_resume: None,
                                 launch_argv: None,
+                                todo: None,
                             },
                         ),
                     ]),
@@ -1702,6 +1709,7 @@ mod tests {
                     agent_session: None,
                     agent_resume: None,
                     launch_argv: None,
+                    todo: None,
                 },
             )
         };
@@ -1718,6 +1726,7 @@ mod tests {
             }),
             agent_resume: None,
             launch_argv: None,
+            todo: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1870,6 +1879,7 @@ mod tests {
                             }),
                             agent_resume: None,
                             launch_argv: None,
+                            todo: None,
                         },
                     )]),
                     zoomed: false,
@@ -2176,6 +2186,7 @@ mod tests {
                 agent_session: None,
                 agent_resume: None,
                 launch_argv: None,
+                todo: None,
             },
         );
         let mut history = SessionHistorySnapshot {

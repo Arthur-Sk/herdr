@@ -162,6 +162,15 @@ pub struct TerminalState {
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
     pub restore_error: Option<String>,
+    /// Set while a person has marked this terminal's agent TODO; cleared only by hand.
+    pub todo: Option<TerminalTodo>,
+}
+
+/// A person's TODO mark on a terminal, with an optional reminder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerminalTodo {
+    /// When to remind, in Unix seconds; cleared once the reminder fires.
+    pub remind_at: Option<u64>,
 }
 
 impl TerminalState {
@@ -202,6 +211,7 @@ impl TerminalState {
             agent_process_acquisition_pending: false,
             pending_agent_resume_plan: None,
             restore_error: None,
+            todo: None,
         }
     }
 

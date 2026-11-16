@@ -3,6 +3,34 @@ use ratatui::layout::Rect;
 use crate::app;
 use crate::protocol::{self, FrameData};
 
+/// Carries a pane's TODO mark to the TUI as reserved agent tokens, which the
+/// frozen client-shell codec already transports.
+fn push_todo_tokens(app: &app::App, pane_id: &str, tokens: &mut Vec<(String, String)>) {
+    tokens.retain(|(key, _)| {
+        key != crate::pane_todo::TODO_TOKEN && key != crate::pane_todo::REMIND_AT_TOKEN
+    });
+    let Some(todo) = app
+        .parse_pane_id(pane_id)
+        .and_then(|(workspace_index, pane_id)| {
+            app.state
+                .workspaces
+                .get(workspace_index)?
+                .terminal_id(pane_id)
+        })
+        .and_then(|terminal_id| app.state.terminals.get(terminal_id))
+        .and_then(|terminal| terminal.todo)
+    else {
+        return;
+    };
+    tokens.push((crate::pane_todo::TODO_TOKEN.to_owned(), "1".to_owned()));
+    if let Some(remind_at) = todo.remind_at {
+        tokens.push((
+            crate::pane_todo::REMIND_AT_TOKEN.to_owned(),
+            remind_at.to_string(),
+        ));
+    }
+}
+
 #[cfg(test)]
 pub(super) fn snapshot(
     app: &app::App,
@@ -157,6 +185,7 @@ pub(super) fn snapshot_with_completions(
             let mut state_labels = agent.state_labels.into_iter().collect::<Vec<_>>();
             state_labels.sort_by(|left, right| left.0.cmp(&right.0));
             let mut tokens = agent.tokens.into_iter().collect::<Vec<_>>();
+            push_todo_tokens(app, &pane_id, &mut tokens);
             tokens.sort_by(|left, right| left.0.cmp(&right.0));
             protocol::ClientShellAgent {
                 pane_id,

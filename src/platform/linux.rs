@@ -994,9 +994,26 @@ pub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Re
     show_desktop_notification_with_command(title, body, |program| Command::new(program))
 }
 
+/// Show a desktop notification that stays until dismissed, for a reminder a
+/// person set: GNOME keeps critical notifications on screen.
+pub fn show_reminder_notification(title: &str, body: Option<&str>) -> std::io::Result<bool> {
+    show_notification_with_command(title, body, &["--urgency", "critical"], |program| {
+        Command::new(program)
+    })
+}
+
 fn show_desktop_notification_with_command(
     title: &str,
     body: Option<&str>,
+    command: impl FnMut(&str) -> Command,
+) -> std::io::Result<bool> {
+    show_notification_with_command(title, body, &[], command)
+}
+
+fn show_notification_with_command(
+    title: &str,
+    body: Option<&str>,
+    extra_args: &[&str],
     mut command: impl FnMut(&str) -> Command,
 ) -> std::io::Result<bool> {
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
@@ -1004,7 +1021,11 @@ fn show_desktop_notification_with_command(
     }
 
     let mut cmd = command("notify-send");
-    cmd.arg("--app-name").arg("Herdr").arg("--").arg(title);
+    cmd.arg("--app-name")
+        .arg("Herdr")
+        .args(extra_args)
+        .arg("--")
+        .arg(title);
     if let Some(body) = body.filter(|body| !body.is_empty()) {
         cmd.arg(body);
     }

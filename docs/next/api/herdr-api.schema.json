@@ -3341,6 +3341,32 @@
           ],
           "type": "object"
         },
+        "PaneTodoSetParams": {
+          "description": "Marks a pane's agent TODO, optionally with a reminder, or marks it done.",
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "remind_at": {
+              "description": "When to remind, in Unix seconds. It replaces an earlier reminder;\nomitted, the mark has none.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "todo": {
+              "default": true,
+              "description": "False marks the TODO done, which also drops its reminder.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pane_id"
+          ],
+          "type": "object"
+        },
         "PaneWaitForOutputParams": {
           "properties": {
             "lines": {
@@ -5857,6 +5883,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.todo.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTodoSetParams"
             }
           },
           "required": [

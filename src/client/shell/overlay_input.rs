@@ -998,6 +998,32 @@ impl ClientShellState {
                     label: Some(trimmed.to_owned()),
                 },
             )),
+            ClientRenameTarget::Reminder { pane_id } => {
+                let parsed = crate::pane_todo::parse_remind_at(
+                    trimmed,
+                    crate::pane_todo::unix_now(),
+                    crate::pane_todo::local_utc_offset_secs(),
+                );
+                match parsed {
+                    Ok(remind_at) => Some(crate::api::schema::Method::PaneTodoSet(
+                        crate::api::schema::PaneTodoSetParams {
+                            pane_id,
+                            todo: true,
+                            remind_at: Some(remind_at),
+                        },
+                    )),
+                    Err(_) => {
+                        // Keep the dialog open with what was typed.
+                        self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+                            title: super::context_menu::REMIND_RETRY_TITLE,
+                            input: rename.input,
+                            target: ClientRenameTarget::Reminder { pane_id },
+                        }));
+                        outcome.repaint = true;
+                        return;
+                    }
+                }
+            }
         };
         if let Some(method) = method {
             self.push_endpoint_method(method, outcome);
