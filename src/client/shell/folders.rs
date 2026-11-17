@@ -608,11 +608,14 @@ pub(super) enum AgentListRow {
 /// The groups of the priority view, in the order it shows them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum AgentGroup {
-    /// Blocked, done or idle: the agent waits for a person.
-    Waiting,
-    Working,
     /// Marked TODO: put aside to come back to, whatever its state.
     Todo,
+    /// Finished its task and not looked at since, or blocked on a question:
+    /// the agent stopped and waits for a person.
+    Done,
+    Working,
+    /// Idle and already looked at: nothing new to see.
+    Idle,
     /// No state known: shells and agents not yet recognised.
     Other,
 }
@@ -621,19 +624,26 @@ impl AgentGroup {
     pub(super) fn of(status: AgentStatus, todo: bool) -> Self {
         match status {
             _ if todo => Self::Todo,
-            AgentStatus::Blocked | AgentStatus::Done | AgentStatus::Idle => Self::Waiting,
+            AgentStatus::Blocked | AgentStatus::Done => Self::Done,
             AgentStatus::Working => Self::Working,
+            AgentStatus::Idle => Self::Idle,
             AgentStatus::Unknown => Self::Other,
         }
     }
 
     pub(super) fn label(self) -> &'static str {
         match self {
-            Self::Waiting => "waiting",
-            Self::Working => "working",
             Self::Todo => "todo",
+            Self::Done => "done",
+            Self::Working => "working",
+            Self::Idle => "idle",
             Self::Other => "other",
         }
+    }
+
+    /// Blocked, done or idle: the agent waits for a person.
+    pub(super) fn waits(self) -> bool {
+        matches!(self, Self::Done | Self::Idle)
     }
 }
 
@@ -741,7 +751,7 @@ fn build_tree<T: Clone>(
             stat.count += 1;
             stat.todo |= item.todo;
             match AgentGroup::of(item.status, item.todo) {
-                AgentGroup::Waiting => {
+                group if group.waits() => {
                     stat.waiting += 1;
                     if stat
                         .waiting_status
@@ -751,7 +761,7 @@ fn build_tree<T: Clone>(
                     }
                 }
                 AgentGroup::Working => stat.working += 1,
-                AgentGroup::Todo | AgentGroup::Other => {}
+                _ => {}
             }
             if item.focused {
                 stat.focused_item.get_or_insert(index);
@@ -1022,8 +1032,8 @@ pub(super) fn agent_order_in_folders(
         .collect()
 }
 
-/// Every agent by how soon it needs a person: waiting (blocked, done, idle),
-/// working, marked TODO, unknown; the latest change first within each state.
+/// Every agent in the groups of the priority view: marked TODO, done (blocked
+/// first), working, idle, unknown; the latest change first within each state.
 pub(super) fn priority_agent_order(snapshot: &ClientShellSnapshot) -> Vec<String> {
     let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
     agents.sort_by_key(|agent| {
@@ -1045,9 +1055,7 @@ pub(super) fn waiting_agent_order(snapshot: &ClientShellSnapshot) -> Vec<String>
     let mut agents = snapshot
         .agents
         .iter()
-        .filter(|agent| {
-            AgentGroup::of(agent.agent_status, agent_is_todo(agent)) == AgentGroup::Waiting
-        })
+        .filter(|agent| AgentGroup::of(agent.agent_status, agent_is_todo(agent)).waits())
         .collect::<Vec<_>>();
     agents.sort_by_key(|agent| {
         (
@@ -1063,7 +1071,7 @@ pub(super) fn waiting_agent_order(snapshot: &ClientShellSnapshot) -> Vec<String>
 
 /// The agents list of a sidebar with folders: the folder tree (agents in
 /// their spaces' order inside each folder), or, sorted by priority, everyone
-/// in the groups waiting, working and other.
+/// in the groups todo, done, working, idle and other.
 pub(super) fn agent_panel_rows(
     snapshot: &ClientShellSnapshot,
     folders: &SidebarFolders,

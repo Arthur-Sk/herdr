@@ -648,7 +648,7 @@ fn set_statuses(state: &mut ClientShellState, statuses: [AgentStatus; 3]) {
 }
 
 #[test]
-fn priority_view_puts_waiting_then_working_then_the_rest() {
+fn priority_view_puts_done_then_working_then_the_rest() {
     let mut state = state_with(filed(&[("w2", "ASOUP"), ("w3", "ASOUP")]));
     set_statuses(
         &mut state,
@@ -672,11 +672,12 @@ fn priority_view_puts_waiting_then_working_then_the_rest() {
     let text = compose(&mut state);
     assert!(text.contains("priority"), "{text}");
     assert_eq!(shown_agents(&state), ["w3:p1", "w1:p1", "w2:p1"]);
-    let waiting = text.lines().position(|line| line.contains("waiting 1"));
+    // Blocked goes with done: both stopped and wait for a person.
+    let done = text.lines().position(|line| line.contains("done 1"));
     let working = text.lines().position(|line| line.contains("working 1"));
     let other = text.lines().position(|line| line.contains("other 1"));
     assert!(
-        waiting.is_some() && waiting < working && working < other,
+        done.is_some() && done < working && working < other,
         "{text}"
     );
     let snapshot = state.snapshot.clone().unwrap();
@@ -810,17 +811,17 @@ fn todo_agents_get_their_own_group_and_groups_fold() {
     let text = compose(&mut state);
     let line_of = |needle: &str| text.lines().position(|line| line.contains(needle));
     assert!(
-        line_of("waiting 2").is_some() && line_of("waiting 2") < line_of("todo 1"),
+        line_of("todo 1").is_some() && line_of("todo 1") < line_of("idle 2"),
         "{text}"
     );
-    assert_eq!(shown_agents(&state), ["w1:p1", "w2:p1", "w3:p1"]);
+    assert_eq!(shown_agents(&state), ["w3:p1", "w1:p1", "w2:p1"]);
 
     // A click folds a group to its head, kept in the preferences.
-    let (head, _) = state.hits.agent_groups[0];
+    let (head, _) = state.hits.agent_groups[1];
     click(&mut state, (head.x + 2, head.y));
-    assert!(state.folders.collapsed_groups.contains("waiting"));
+    assert!(state.folders.collapsed_groups.contains("idle"));
     let text = compose(&mut state);
-    assert!(text.contains("▸ ○ waiting 2"), "{text}");
+    assert!(text.contains("▸ ○ idle 2"), "{text}");
     assert_eq!(shown_agents(&state), ["w3:p1"]);
 
     // The folder counts the TODO agent with neither waiting nor working.
@@ -831,6 +832,35 @@ fn todo_agents_get_their_own_group_and_groups_fold() {
         .rfind(|line| line.contains("▾ ASOUP"))
         .expect("ASOUP row");
     assert!(asoup.contains("1○ 2 "), "{asoup:?}");
+}
+
+#[test]
+fn priority_view_shows_todo_then_finished_then_working_then_idle() {
+    let mut state = state_with(SidebarFolders::default());
+    state.config.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+    let mut snapshot = state.snapshot.clone().unwrap();
+    let mut second = snapshot.panes[2].clone();
+    second.pane_id = "w3:p2".into();
+    snapshot.panes.push(second);
+    let mut notes = agent("w3", "notes", false);
+    notes.pane_id = "w3:p2".into();
+    snapshot.agents.push(notes);
+    snapshot.agents[1].agent_status = AgentStatus::Working;
+    snapshot.agents[2].tokens.push(todo_token());
+    snapshot.agents[3].agent_status = AgentStatus::Working;
+    state.set_snapshot(snapshot.clone());
+    // w3:p2 finishes while nobody looks at it: done, not idle.
+    snapshot.agents[3].agent_status = AgentStatus::Idle;
+    state.set_snapshot(snapshot);
+
+    let text = compose(&mut state);
+    let line_of = |needle: &str| text.lines().position(|line| line.contains(needle));
+    let heads = ["todo 1", "done 1", "working 1", "idle 1"].map(line_of);
+    assert!(
+        heads.iter().all(Option::is_some) && heads.is_sorted(),
+        "{heads:?}\n{text}"
+    );
+    assert_eq!(shown_agents(&state), ["w3:p1", "w3:p2", "w2:p1", "w1:p1"]);
 }
 
 #[test]

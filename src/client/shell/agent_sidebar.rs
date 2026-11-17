@@ -274,7 +274,7 @@ pub(super) fn render_agent_panel(
     );
 }
 
-/// The head of a priority group: "● waiting 5", coloured by its most urgent
+/// The head of a priority group: "● done 5", coloured by its most urgent
 /// state, with a rule to the edge.
 fn render_group_row(
     buffer: &mut Buffer,

@@ -539,8 +539,8 @@ impl ClientShellState {
         outcome.repaint = true;
     }
 
-    /// The agents list sorted by priority: with folders, the view of waiting,
-    /// working and other agents in place of the folder tree.
+    /// The agents list sorted by priority: with folders, the view of TODO,
+    /// done, working, idle and other agents in place of the folder tree.
     pub(super) fn agents_by_priority(&self) -> bool {
         self.config.agent_panel_sort == crate::config::AgentPanelSortConfig::Priority
     }
