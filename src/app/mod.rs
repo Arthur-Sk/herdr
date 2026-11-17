@@ -21,6 +21,7 @@ mod git_refresh;
 mod ids;
 mod pane_todo;
 pub(crate) use pane_todo::DueTodoReminder;
+mod agent_insight;
 mod popup;
 mod runtime;
 mod session;
@@ -143,6 +144,8 @@ pub struct App {
     pub(crate) agent_metadata_deadline: Option<Instant>,
     /// Earliest pending pane TODO reminder, in Unix seconds.
     pub(crate) todo_reminder_due: Option<u64>,
+    /// When to reread Claude transcripts, and the logins found (fork).
+    pub(crate) agent_insight: agent_insight::AgentInsightTimers,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
     pub(crate) pending_host_appearance_deadline: Option<Instant>,
     pane_host_appearance: Option<crate::terminal_theme::HostAppearance>,
@@ -658,6 +661,7 @@ impl App {
             loaded_host_cursor: config.ui.host_cursor,
             agent_metadata_deadline: None,
             todo_reminder_due: None,
+            agent_insight: Default::default(),
             pending_agent_resume_deadline: None,
             pending_host_appearance_deadline: None,
             pane_host_appearance: None,
@@ -699,6 +703,7 @@ impl App {
         app.configure_window_title(&config.ui.window_title);
         app.refresh_restored_workspace_git_metadata();
         app.sync_todo_reminder_due();
+        app.schedule_agent_insight_refresh();
         Ok(app)
     }
 
@@ -763,6 +768,7 @@ impl App {
         });
         app.refresh_restored_workspace_git_metadata();
         app.sync_todo_reminder_due();
+        app.schedule_agent_insight_refresh();
         Ok(app)
     }
 

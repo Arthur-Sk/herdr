@@ -1594,6 +1594,14 @@ impl App {
         let report_is_newer = self
             .pane_terminal(ws_idx, pane_id)
             .is_some_and(|terminal| terminal.hook_report_is_newer(&params.source, params.seq));
+        let claude_transcript = (agent_label == "claude")
+            .then(|| {
+                params
+                    .agent_session_id
+                    .clone()
+                    .zip(params.agent_session_path.clone())
+            })
+            .flatten();
         let session_ref = crate::agent_resume::session_ref_from_report(
             &params.source,
             &agent_label,
@@ -1611,6 +1619,9 @@ impl App {
         });
         let applied =
             report_is_newer && self.session_report_applied(ws_idx, pane_id, session_ref.as_ref());
+        if let Some((session_id, path)) = claude_transcript.filter(|_| applied) {
+            self.note_agent_transcript(ws_idx, pane_id, &session_id, path.into());
+        }
         self.report_agent_resume(
             id,
             ws_idx,
@@ -1639,6 +1650,14 @@ impl App {
         let report_is_newer = self
             .pane_terminal(ws_idx, pane_id)
             .is_some_and(|terminal| terminal.hook_report_is_newer(&params.source, params.seq));
+        let claude_transcript = (agent_label == "claude")
+            .then(|| {
+                params
+                    .agent_session_id
+                    .clone()
+                    .zip(params.agent_session_path.clone())
+            })
+            .flatten();
         let session_ref = crate::agent_resume::session_ref_from_report(
             &params.source,
             &agent_label,
@@ -1657,6 +1676,9 @@ impl App {
         });
         let applied =
             report_is_newer && self.session_report_applied(ws_idx, pane_id, session_ref.as_ref());
+        if let Some((session_id, path)) = claude_transcript.filter(|_| applied) {
+            self.note_agent_transcript(ws_idx, pane_id, &session_id, path.into());
+        }
         self.report_agent_resume(
             id,
             ws_idx,

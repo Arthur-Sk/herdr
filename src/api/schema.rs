@@ -29,7 +29,7 @@ pub use tabs::*;
 pub use workspaces::*;
 pub use worktrees::*;
 
-fn is_false(value: &bool) -> bool {
+pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 
@@ -118,6 +118,9 @@ operations::define_operations! {
     PaneLinkResolve(PaneLinkActivateParams) => "pane.link.resolve", false, true;
     PaneRename(PaneRenameParams) => "pane.rename", true, true;
     PaneTodoSet(PaneTodoSetParams) => "pane.todo.set", true, true;
+    PaneAgentAct(PaneAgentActParams) => "pane.agent.act", true, true;
+    AgentSweep(AgentSweepParams) => "agent.sweep", true, true;
+    AgentReopen(AgentReopenParams) => "agent.reopen", true, true;
     PaneSendText(PaneSendTextParams) => "pane.send_text", false, false;
     PaneSendKeys(PaneSendKeysParams) => "pane.send_keys", false, false;
     PaneSendInput(PaneSendInputParams) => "pane.send_input", false, false;

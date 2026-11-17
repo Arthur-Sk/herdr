@@ -834,6 +834,25 @@ impl ClientShellState {
             | PendingEndpointKind::IntegrationInstall) => {
                 return self.handle_settings_endpoint_result(kind, result);
             }
+            PendingEndpointKind::CloseAgents { folders } => {
+                let mut outcome = ClientShellInput::default();
+                let repaint = match result {
+                    Ok(crate::api::schema::ResponseResult::ClosedAgents { agents }) => {
+                        self.remember_closed_agents(agents, &folders, &mut outcome);
+                        true
+                    }
+                    Ok(_) => false,
+                    Err(_) => true,
+                };
+                return (repaint || outcome.repaint, outcome.actions);
+            }
+            PendingEndpointKind::ReopenAgent { key } => {
+                let mut outcome = ClientShellInput::default();
+                if result.is_ok() {
+                    self.forget_closed_agent(&key, &mut outcome);
+                }
+                return (true, outcome.actions);
+            }
             kind => {
                 let mut outcome = ClientShellInput::default();
                 let repaint = self.handle_worktree_endpoint_result(kind, result, &mut outcome);

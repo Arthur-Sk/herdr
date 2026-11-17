@@ -380,7 +380,9 @@ impl ClientShellState {
                         pane_id,
                         workspace_id: agent.workspace_id.clone(),
                     }),
-                folders::AgentListRow::Folder(_) | folders::AgentListRow::Group { .. } => None,
+                folders::AgentListRow::Folder(_)
+                | folders::AgentListRow::Group { .. }
+                | folders::AgentListRow::Closed { .. } => None,
             })
             .collect(),
         }

@@ -663,6 +663,37 @@ impl ClientShellState {
         if let Some(bar) = mode_bar {
             occlusion.cover(bar);
         }
+        // An agent's card, beside its row as this frame laid it out.
+        let hovered = self
+            .agent_hover
+            .as_ref()
+            .filter(|hover| hover.shown && self.overlay.is_none())
+            .and_then(|hover| {
+                let row = self
+                    .hits
+                    .agents
+                    .iter()
+                    .find(|(_, pane_id)| *pane_id == hover.pane_id)?
+                    .0;
+                let agent = snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.pane_id == hover.pane_id)?;
+                Some((row, agent))
+            });
+        if let Some((row, agent)) = hovered {
+            let mut composed = frame.to_ratatui_buffer()?;
+            if let Some(area) = super::agent_card::render_agent_card(
+                &mut composed,
+                row,
+                agent,
+                snapshot,
+                &self.config.palette,
+            ) {
+                occlusion.cover(area);
+                frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+            }
+        }
         if let Some(overlay) = self.overlay.as_ref() {
             let mut composed = frame.to_ratatui_buffer()?;
             let cursor = if let ClientShellOverlay::ContextMenu(menu) = overlay {

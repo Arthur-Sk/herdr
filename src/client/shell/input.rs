@@ -238,6 +238,13 @@ impl ClientShellState {
                 },
                 other => other,
             };
+            match &event {
+                RawInputEvent::Mouse(mouse) => outcome.repaint |= self.track_agent_hover(mouse),
+                RawInputEvent::Key(_) | RawInputEvent::Text(_) => {
+                    outcome.repaint |= self.hide_agent_hover();
+                }
+                _ => {}
+            }
             if self.handle_machine_badge_event(&event, &mut outcome) {
                 continue;
             }
@@ -798,6 +805,13 @@ impl ClientShellState {
         if code == KeyCode::Char('/') && modifiers.is_empty() && self.sidebar_has_folders() {
             self.cancel_navigate(outcome);
             self.open_sidebar_filter();
+            return;
+        }
+        if code == KeyCode::Char('z')
+            && modifiers == KeyModifiers::CONTROL
+            && self.sidebar_has_folders()
+        {
+            self.undo_layout(outcome);
             return;
         }
         if self.workspace_preview_action_blocked() {

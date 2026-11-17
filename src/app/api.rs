@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+mod agent_actions;
 mod agent_view;
 mod agents;
 mod env;
@@ -1189,6 +1190,9 @@ impl App {
             }
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
             Method::PaneTodoSet(params) => return self.handle_pane_todo_set(request.id, params),
+            Method::PaneAgentAct(params) => return self.handle_pane_agent_act(request.id, params),
+            Method::AgentSweep(params) => return self.handle_agent_sweep(request.id, params),
+            Method::AgentReopen(params) => return self.handle_agent_reopen(request.id, params),
             Method::PaneRead(params) => return self.handle_pane_read(request.id, params),
             Method::PaneReportAgent(params) => {
                 return self.handle_pane_report_agent(request.id, params);

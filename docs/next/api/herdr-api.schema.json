@@ -1320,6 +1320,38 @@
           ],
           "type": "object"
         },
+        "AgentReopenParams": {
+          "description": "Opens a closed agent again: a new tab that resumes its session (fork).",
+          "properties": {
+            "argv": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "description": "Where the tab opens; the focused workspace when missing or gone.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "cwd",
+            "argv"
+          ],
+          "type": "object"
+        },
         "AgentSendKeysParams": {
           "properties": {
             "keys": {
@@ -1381,6 +1413,16 @@
             "unknown"
           ],
           "type": "string"
+        },
+        "AgentSweepParams": {
+          "description": "Closes the panes Claude sessions left behind when they exited (fork).",
+          "properties": {
+            "dry_run": {
+              "description": "Only report what would close.",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
         },
         "AgentTarget": {
           "properties": {
@@ -2425,6 +2467,73 @@
                 "value"
               ],
               "type": "object"
+            }
+          ]
+        },
+        "PaneAgentActParams": {
+          "description": "Acts on the Claude agent in a pane (fork).",
+          "properties": {
+            "action": {
+              "$ref": "#/schemas/request/$defs/PaneAgentAction"
+            },
+            "login": {
+              "description": "The login (`claude` or `claude-<id>`) a relaunch runs under.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "on": {
+              "description": "Turns `continue_after_reset` on or off.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "text": {
+              "description": "What `send` submits, or what `continue_after_reset` sends later.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "action"
+          ],
+          "type": "object"
+        },
+        "PaneAgentAction": {
+          "description": "What `pane.agent.act` does to the Claude agent in a pane (fork).",
+          "oneOf": [
+            {
+              "const": "dismiss_question",
+              "description": "Stop showing the agent's last message as a question.",
+              "type": "string"
+            },
+            {
+              "const": "relaunch",
+              "description": "Exit the agent and resume its session under `login`.",
+              "type": "string"
+            },
+            {
+              "const": "continue_after_reset",
+              "description": "Send `text` once the agent's usage limit lifts (`on`), or stop that.",
+              "type": "string"
+            },
+            {
+              "const": "send",
+              "description": "Submit `text` (a prompt or a slash command) while the agent waits.",
+              "type": "string"
+            },
+            {
+              "const": "finish",
+              "description": "Exit the agent and close its pane; the result says how to resume it.",
+              "type": "string"
             }
           ]
         },
@@ -5910,6 +6019,54 @@
         {
           "properties": {
             "method": {
+              "const": "pane.agent.act",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneAgentActParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.sweep",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentSweepParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.reopen",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentReopenParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.send_text",
               "type": "string"
             },
@@ -6825,6 +6982,44 @@
             "no_foreground_client"
           ],
           "type": "string"
+        },
+        "ClosedAgentInfo": {
+          "description": "An agent whose pane closed, with what resumes it (fork).",
+          "properties": {
+            "argv": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "closed_at": {
+              "description": "Unix seconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "workspace_id",
+            "title",
+            "cwd",
+            "argv",
+            "closed_at"
+          ],
+          "type": "object"
         },
         "ConfigReloadStatus": {
           "enum": [
@@ -9457,6 +9652,26 @@
                 "type",
                 "tab",
                 "root_pane"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Agents whose panes closed (fork: `agent.sweep`, `pane.agent.act` finish).",
+              "properties": {
+                "agents": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ClosedAgentInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "closed_agents",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "agents"
               ],
               "type": "object"
             },

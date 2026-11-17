@@ -7,7 +7,10 @@ impl ClientContextMenuOverlay {
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
         use ClientContextMenuAction as Action;
 
-        let item = |label, action| ClientContextMenuItem { label, action };
+        let item = |label: &'static str, action| ClientContextMenuItem {
+            label: label.into(),
+            action,
+        };
         let mut items = self.base_items();
         if let ClientContextMenuTarget::Workspace { folders: true, .. } = &self.target {
             items.push(item("Move to folder...", Action::MoveToFolder));
@@ -18,7 +21,10 @@ impl ClientContextMenuOverlay {
     fn base_items(&self) -> Vec<ClientContextMenuItem> {
         use ClientContextMenuAction as Action;
 
-        let item = |label, action| ClientContextMenuItem { label, action };
+        let item = |label: &'static str, action| ClientContextMenuItem {
+            label: label.into(),
+            action,
+        };
         match &self.target {
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
@@ -98,38 +104,78 @@ impl ClientContextMenuOverlay {
                 items
             }
             ClientContextMenuTarget::Agent {
-                todo, filed_apart, ..
+                todo,
+                filed_apart,
+                insight,
+                folders,
+                ..
             } => {
                 let mut items = todo.map(todo_items).unwrap_or_default();
-                items.push(item("Move to folder...", Action::MoveToFolder));
-                if *filed_apart {
-                    items.push(item("Follow its space's folder", Action::FollowSpaceFolder));
+                if let Some(insight) = insight {
+                    items.extend(super::agent_menu::insight_items(insight));
+                }
+                if *folders {
+                    items.push(item("Move to folder...", Action::MoveToFolder));
+                    if *filed_apart {
+                        items.push(item("Follow its space's folder", Action::FollowSpaceFolder));
+                    }
                 }
                 items
             }
-            ClientContextMenuTarget::Folder { muted, .. } => vec![
-                item("New subfolder...", Action::NewFolder),
-                item("Move up", Action::MoveFolderUp),
-                item("Move down", Action::MoveFolderDown),
-                item("Move to folder...", Action::MoveToFolder),
-                item("Rename...", Action::RenameFolder),
-                item(
-                    if *muted {
-                        "Unmute notifications"
-                    } else {
-                        "Mute notifications"
-                    },
-                    Action::ToggleMuteFolder,
-                ),
-                item("Delete folder", Action::DeleteFolder),
-                item("Show only this folder", Action::ShowOnlyFolder),
-                item("Expand all", Action::ExpandAllFolders),
-                item("Collapse all", Action::CollapseAllFolders),
-            ],
+            ClientContextMenuTarget::AgentGroup { head, relaunch, .. } => {
+                super::agent_menu::group_items(*head, *relaunch)
+            }
+            ClientContextMenuTarget::ClosedAgent { relaunch, .. } => {
+                super::agent_menu::closed_items(*relaunch)
+            }
+            ClientContextMenuTarget::Logins { labels, .. } => labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| ClientContextMenuItem {
+                    label: label.clone().into(),
+                    action: Action::PickLogin(index),
+                })
+                .collect(),
+            ClientContextMenuTarget::Folder { muted, compact, .. } => {
+                let mut items = vec![
+                    item("New subfolder...", Action::NewFolder),
+                    item("Move up", Action::MoveFolderUp),
+                    item("Move down", Action::MoveFolderDown),
+                    item("Move to folder...", Action::MoveToFolder),
+                    item("Rename...", Action::RenameFolder),
+                    item(
+                        if *muted {
+                            "Unmute notifications"
+                        } else {
+                            "Mute notifications"
+                        },
+                        Action::ToggleMuteFolder,
+                    ),
+                    item("Delete folder", Action::DeleteFolder),
+                    item("Show only this folder", Action::ShowOnlyFolder),
+                    item("Expand all", Action::ExpandAllFolders),
+                    item("Collapse all", Action::CollapseAllFolders),
+                ];
+                if !compact.is_empty() {
+                    items.push(ClientContextMenuItem {
+                        label: format!(
+                            "Compact {} agent{} over 250k",
+                            compact.len(),
+                            if compact.len() == 1 { "" } else { "s" }
+                        )
+                        .into(),
+                        action: Action::Compact,
+                    });
+                }
+                items
+            }
             ClientContextMenuTarget::SidebarSection {
                 section,
                 filtered,
                 agents_by_priority,
+                sweep,
+                undo,
+                closed,
             } => {
                 let mut items = Vec::new();
                 if *section == super::folders::FolderSection::Agents {
@@ -164,16 +210,45 @@ impl ClientContextMenuOverlay {
                     item("Expand all", Action::ExpandAllFolders),
                     item("Collapse all", Action::CollapseAllFolders),
                 ]);
+                if *section == super::folders::FolderSection::Agents {
+                    if *sweep {
+                        items.push(item("Close finished tabs", Action::CloseFinishedTabs));
+                    }
+                    if *closed {
+                        items.push(item("Forget closed agents", Action::ForgetAllClosed));
+                    }
+                }
+                if *undo {
+                    items.push(item("Undo layout change", Action::UndoLayout));
+                }
                 items
             }
         }
     }
 }
 
+/// The actions an agent's menu runs through `pane.agent.act`.
+fn is_agent_action(action: ClientContextMenuAction) -> bool {
+    use ClientContextMenuAction as Action;
+
+    matches!(
+        action,
+        Action::DismissQuestion
+            | Action::RelaunchAs
+            | Action::ContinueAfterReset
+            | Action::StopContinueAfterReset
+            | Action::Compact
+            | Action::FinishAgent
+    )
+}
+
 fn todo_items(todo: PaneTodoMenu) -> Vec<ClientContextMenuItem> {
     use ClientContextMenuAction as Action;
 
-    let item = |label, action| ClientContextMenuItem { label, action };
+    let item = |label: &'static str, action| ClientContextMenuItem {
+        label: label.into(),
+        action,
+    };
     let mut items = vec![if todo.marked {
         item("Mark as done", Action::MarkTodoDone)
     } else {
@@ -287,8 +362,10 @@ impl ClientShellState {
                 .find(|agent| agent.pane_id == pane_id)
                 .map(|agent| agent.workspace_id.clone())
         });
+        let insight = self.agent_insight_menu(&pane_id);
+        let folders = self.sidebar_has_folders();
         let (Some(workspace_id), true) =
-            (workspace_id, todo.is_some() || self.sidebar_has_folders())
+            (workspace_id, todo.is_some() || folders || insight.is_some())
         else {
             return false;
         };
@@ -299,6 +376,8 @@ impl ClientShellState {
                 workspace_id,
                 todo,
                 filed_apart,
+                insight,
+                folders,
             },
             x,
             y,
@@ -314,10 +393,19 @@ impl ClientShellState {
         x: u16,
         y: u16,
     ) {
+        let compact = match (section, self.snapshot.as_deref()) {
+            (super::folders::FolderSection::Agents, Some(snapshot))
+                if self.endpoint_offers("pane.agent.act") =>
+            {
+                super::agent_menu::compactable_in_folder(snapshot, &self.folders, &path)
+            }
+            _ => Vec::new(),
+        };
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Folder {
                 section,
                 muted: self.folders.muted.contains(&path),
+                compact,
                 path,
             },
             x,
@@ -337,6 +425,9 @@ impl ClientShellState {
                 section,
                 filtered: !self.sidebar_filter.trim().is_empty(),
                 agents_by_priority: self.agents_by_priority(),
+                sweep: self.endpoint_offers("agent.sweep"),
+                undo: !self.layout_undo.is_empty(),
+                closed: !self.folders.closed.is_empty(),
             },
             x,
             y,
@@ -391,7 +482,33 @@ impl ClientShellState {
             outcome.repaint = true;
             return;
         };
+        let (x, y) = (menu.x, menu.y);
         match menu.target {
+            ClientContextMenuTarget::Agent { pane_id, .. } if is_agent_action(action) => {
+                self.activate_agent_action(vec![pane_id], action, x, y, outcome)
+            }
+            ClientContextMenuTarget::AgentGroup { pane_ids, .. } => {
+                self.activate_agent_action(pane_ids, action, x, y, outcome)
+            }
+            ClientContextMenuTarget::ClosedAgent { key, .. } => {
+                self.activate_closed_agent_action(key, action, x, y, outcome)
+            }
+            ClientContextMenuTarget::Logins {
+                purpose, logins, ..
+            } => {
+                if let ClientContextMenuAction::PickLogin(index) = action {
+                    if let Some(login) = logins.into_iter().nth(index) {
+                        self.activate_login_choice(purpose, login, outcome);
+                    }
+                }
+            }
+            ClientContextMenuTarget::Folder { compact, .. }
+                if action == ClientContextMenuAction::Compact =>
+            {
+                self.activate_agent_action(compact, action, x, y, outcome)
+            }
+            ClientContextMenuTarget::SidebarSection { .. }
+                if self.activate_agents_section_action(action, outcome) => {}
             ClientContextMenuTarget::Workspace { workspace_id, .. }
                 if action == ClientContextMenuAction::MoveToFolder =>
             {

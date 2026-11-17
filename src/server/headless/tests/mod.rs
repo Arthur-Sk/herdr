@@ -8028,6 +8028,78 @@ fn api_resume_argv_is_ignored_when_its_session_report_is_refused() {
     );
 }
 
+/// The Claude hook reports its transcript with the session; the server reads
+/// it and the agent's row learns that its last message asks the person.
+#[test]
+fn claude_session_report_brings_the_transcript_question_to_the_row() {
+    let (writer, _control_rx, _render_rx) = test_client_writer();
+    let (mut server, pane_id) = completion_guard_server(writer);
+    let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    let terminal_id = server.app.state.workspaces[0].tabs[0].panes[&pane_id]
+        .attached_terminal_id
+        .clone();
+    server.handle_internal_event_with_forwarding(AppEvent::AgentProcessDetected {
+        pane_id,
+        agent: crate::detect::Agent::Claude,
+        observed_at: Instant::now(),
+    });
+    let transcript = std::env::temp_dir().join(format!(
+        "herdr-insight-{}-{}.jsonl",
+        std::process::id(),
+        line!()
+    ));
+    std::fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"merge it?"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a1","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"Ready. Should I merge now?"}],"usage":{"input_tokens":5,"cache_read_input_tokens":210000,"output_tokens":20}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    completion_guard_api_report(
+        &mut server,
+        api::schema::Method::PaneReportAgentSession(api::schema::PaneReportAgentSessionParams {
+            pane_id: public_pane_id,
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            seq: None,
+            agent_session_id: Some("session-q".into()),
+            agent_session_path: Some(transcript.display().to_string()),
+            session_start_source: None,
+            resume_argv: Some(vec!["claude".into(), "--resume".into(), "session-q".into()]),
+        }),
+    );
+
+    assert!(server.app.agent_insight_deadline().is_some());
+    assert!(server
+        .app
+        .refresh_agent_insights(Instant::now() + Duration::from_secs(1)));
+    let tokens = server
+        .app
+        .agent_insight_tokens(&server.app.state.terminals[&terminal_id], "[]")
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    std::fs::remove_file(&transcript).ok();
+    assert!(
+        tokens.contains_key(crate::agent_insight::QUESTION_TOKEN),
+        "{tokens:?}"
+    );
+    assert_eq!(
+        tokens
+            .get(crate::agent_insight::CONTEXT_TOKEN)
+            .map(String::as_str),
+        Some("210025")
+    );
+    assert_eq!(
+        tokens
+            .get(crate::agent_insight::MODEL_TOKEN)
+            .map(String::as_str),
+        Some("claude-opus-5-5")
+    );
+}
+
 fn completion_guard_notifications(
     server: &mut HeadlessServer,
     receiver: &std::sync::mpsc::Receiver<Vec<u8>>,

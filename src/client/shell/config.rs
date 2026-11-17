@@ -70,6 +70,13 @@ impl ClientShellState {
     /// Saves this window's changes over what other windows of the endpoint
     /// saved meanwhile, and takes their folders in.
     pub(super) fn persist_chrome_preferences(&mut self, outcome: &mut ClientShellInput) {
+        self.note_layout_undo();
+        self.store_chrome_preferences(outcome);
+    }
+
+    /// Saves without putting the layout before on the undo stack: what undo
+    /// itself does.
+    pub(super) fn store_chrome_preferences(&mut self, outcome: &mut ClientShellInput) {
         let Some(path) = self.config.preferences_path.clone() else {
             return;
         };
@@ -131,6 +138,8 @@ impl ClientShellState {
         if folders == self.folders {
             return false;
         }
+        // Another window's change is not this one's to undo.
+        self.layout_undo_mark = Some(folders.clone());
         self.folders = folders;
         true
     }

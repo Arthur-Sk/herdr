@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::agent_insight_view::Attention;
 use super::*;
 use crate::api::schema::AgentStatus;
 
@@ -52,6 +53,10 @@ pub(super) struct SidebarFolders {
     /// folders; agents missing here follow in their spaces' order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) agent_order: Vec<String>,
+    /// Agents whose tabs were closed from here, by Claude session id: what
+    /// opens them again.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) closed: BTreeMap<String, ClosedAgent>,
     /// Keys a newer build wrote, kept as they are when this build saves.
     #[serde(flatten)]
     pub(super) unknown: serde_json::Map<String, serde_json::Value>,
@@ -84,9 +89,88 @@ impl SidebarFolders {
                 theirs.collapsed_groups,
             ),
             agent_order: merge_order(&base.agent_order, ours.agent_order, theirs.agent_order),
+            closed: merge_map(&base.closed, ours.closed, theirs.closed),
             unknown: theirs.unknown,
         }
     }
+
+    /// The same folders, filing, order, mutes and closed agents: what undo
+    /// steps back through. Collapsing and the filter are left out.
+    pub(super) fn same_structure(&self, other: &Self) -> bool {
+        self.folders == other.folders
+            && self.spaces == other.spaces
+            && self.agents == other.agents
+            && self.order == other.order
+            && self.agent_order == other.agent_order
+            && self.muted == other.muted
+            && self.closed == other.closed
+    }
+
+    /// `from`'s structure with this one's collapsing and filter.
+    pub(super) fn restore_structure(&mut self, from: Self) {
+        self.folders = from.folders;
+        self.spaces = from.spaces;
+        self.agents = from.agents;
+        self.order = from.order;
+        self.agent_order = from.agent_order;
+        self.muted = from.muted;
+        self.closed = from.closed;
+    }
+
+    /// Keeps a closed agent to open again, filed where it was.
+    pub(super) fn remember_closed(
+        &mut self,
+        info: crate::api::schema::ClosedAgentInfo,
+        folder: Option<String>,
+    ) {
+        let key = closed_agent_key(&info.argv).unwrap_or_else(|| info.pane_id.clone());
+        self.closed.insert(
+            key,
+            ClosedAgent {
+                title: info.title,
+                workspace_id: info.workspace_id,
+                cwd: info.cwd,
+                argv: info.argv,
+                closed_at: info.closed_at,
+                folder,
+            },
+        );
+        while self.closed.len() > CLOSED_AGENTS_KEPT {
+            let Some(oldest) = self
+                .closed
+                .iter()
+                .min_by_key(|(_, closed)| closed.closed_at)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.closed.remove(&oldest);
+        }
+    }
+}
+
+/// How many closed agents the list keeps, the oldest dropped first.
+const CLOSED_AGENTS_KEPT: usize = 100;
+
+/// An agent whose tab was closed, with what resumes its session.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub(super) struct ClosedAgent {
+    pub(super) title: String,
+    pub(super) workspace_id: String,
+    pub(super) cwd: String,
+    pub(super) argv: Vec<String>,
+    /// Unix seconds.
+    pub(super) closed_at: u64,
+    /// The folder its row sat in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) folder: Option<String>,
+}
+
+/// The Claude session a resume command names: what follows `--resume` or `-r`.
+pub(super) fn closed_agent_key(argv: &[String]) -> Option<String> {
+    argv.windows(2)
+        .find(|pair| pair[0] == "--resume" || pair[0] == "-r")
+        .map(|pair| pair[1].clone())
 }
 
 /// `theirs` with what `ours` added since `base` and without what it removed.
@@ -102,11 +186,11 @@ pub(super) fn merge_set(
     theirs
 }
 
-fn merge_map(
-    base: &BTreeMap<String, String>,
-    ours: BTreeMap<String, String>,
-    mut theirs: BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
+fn merge_map<V: PartialEq>(
+    base: &BTreeMap<String, V>,
+    ours: BTreeMap<String, V>,
+    mut theirs: BTreeMap<String, V>,
+) -> BTreeMap<String, V> {
     for key in base.keys().filter(|key| !ours.contains_key(*key)) {
         theirs.remove(key);
     }
@@ -195,6 +279,7 @@ impl SidebarFolders {
             && self.muted.is_empty()
             && self.collapsed_groups.is_empty()
             && self.agent_order.is_empty()
+            && self.closed.is_empty()
             && self.unknown.is_empty()
     }
 
@@ -596,6 +681,10 @@ pub(super) enum AgentListRow {
         pane_id: String,
         depth: u16,
     },
+    /// An agent whose tab was closed, by its key in `SidebarFolders::closed`.
+    Closed {
+        key: String,
+    },
     /// The head of a group in the priority view, or of a state inside TODO.
     Group {
         head: GroupHead,
@@ -611,40 +700,63 @@ pub(super) enum AgentListRow {
 pub(super) enum AgentGroup {
     /// Marked TODO: put aside to come back to, whatever its state.
     Todo,
-    /// Finished its task and not looked at since, or blocked on a question:
-    /// the agent stopped and waits for a person.
+    /// Blocked on a prompt, or stopped on a message that asks the person
+    /// something: stays here, seen or not, until answered or dismissed.
+    Question,
+    /// Stopped by a usage limit or an expired login.
+    Limit,
+    /// Finished its task and not looked at since: the agent stopped and waits
+    /// for a person.
     Done,
     Working,
     /// Idle and already looked at: nothing new to see.
     Idle,
     /// No state known: shells and agents not yet recognised.
     Other,
+    /// Agents whose tabs were closed, to open again. Folded unless opened.
+    Closed,
 }
 
 impl AgentGroup {
-    pub(super) fn of(status: AgentStatus, todo: bool) -> Self {
+    pub(super) fn of(status: AgentStatus, todo: bool, attention: Attention) -> Self {
         match status {
             _ if todo => Self::Todo,
-            AgentStatus::Blocked | AgentStatus::Done => Self::Done,
             AgentStatus::Working => Self::Working,
+            AgentStatus::Blocked => Self::Question,
+            _ if attention == Attention::Limit => Self::Limit,
+            _ if attention == Attention::Question => Self::Question,
+            AgentStatus::Done => Self::Done,
             AgentStatus::Idle => Self::Idle,
             AgentStatus::Unknown => Self::Other,
         }
     }
 
+    /// The group an agent shows in, or with `inside_todo` the state it shows
+    /// under inside TODO.
+    pub(super) fn of_agent(agent: &crate::protocol::ClientShellAgent, inside_todo: bool) -> Self {
+        Self::of(
+            agent.agent_status,
+            !inside_todo && agent_is_todo(agent),
+            Attention::of(agent),
+        )
+    }
+
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Todo => "todo",
+            Self::Question => "question",
+            Self::Limit => "limit",
             Self::Done => "done",
             Self::Working => "working",
             Self::Idle => "idle",
             Self::Other => "other",
+            Self::Closed => "closed",
         }
     }
 
-    /// Blocked, done or idle: the agent waits for a person.
+    /// Asking, held by a limit, done or idle: the agent waits for a person.
     pub(super) fn waits(self) -> bool {
-        matches!(self, Self::Done | Self::Idle)
+        matches!(self, Self::Question | Self::Limit | Self::Done | Self::Idle)
     }
 }
 
@@ -716,6 +828,7 @@ struct TreeItem<T> {
     focused: bool,
     status: AgentStatus,
     todo: bool,
+    attention: Attention,
 }
 
 #[derive(Default)]
@@ -780,14 +893,20 @@ fn build_tree<T: Clone>(
             let stat = stats.entry(path.to_owned()).or_default();
             stat.count += 1;
             stat.todo |= item.todo;
-            match AgentGroup::of(item.status, item.todo) {
+            match AgentGroup::of(item.status, item.todo, item.attention) {
                 group if group.waits() => {
                     stat.waiting += 1;
+                    // A question colours the count as a blocked agent does.
+                    let status = if group == AgentGroup::Question {
+                        AgentStatus::Blocked
+                    } else {
+                        item.status
+                    };
                     if stat
                         .waiting_status
-                        .is_none_or(|status| attention_rank(item.status) < attention_rank(status))
+                        .is_none_or(|known| attention_rank(status) < attention_rank(known))
                     {
-                        stat.waiting_status = Some(item.status);
+                        stat.waiting_status = Some(status);
                     }
                 }
                 AgentGroup::Working => stat.working += 1,
@@ -898,6 +1017,7 @@ pub(super) fn spaces_rows(
                     .max_by_key(|status| status_priority(*status))
                     .unwrap_or(AgentStatus::Unknown),
                 todo: false,
+                attention: Attention::None,
                 value: block,
             })
         })
@@ -967,6 +1087,11 @@ fn agent_text(
         workspace.map(|workspace| workspace.label.as_str()),
         Some(status_text(agent.agent_status)),
         agent_is_todo(agent).then_some("todo"),
+        match Attention::of(agent) {
+            Attention::Question => Some("question"),
+            Attention::Limit => Some("limit"),
+            Attention::None => None,
+        },
         folder,
     ]
     .into_iter()
@@ -1015,6 +1140,7 @@ pub(super) fn agent_list_rows(
                 focused: agent.focused,
                 status: agent.agent_status,
                 todo: agent_is_todo(agent),
+                attention: Attention::of(agent),
             })
         })
         .collect::<Vec<_>>();
@@ -1057,20 +1183,22 @@ pub(super) fn agent_order_in_folders(
         .into_iter()
         .filter_map(|row| match row {
             AgentListRow::Agent { pane_id, .. } => Some(pane_id),
-            AgentListRow::Folder(_) | AgentListRow::Group { .. } => None,
+            AgentListRow::Folder(_) | AgentListRow::Group { .. } | AgentListRow::Closed { .. } => {
+                None
+            }
         })
         .collect()
 }
 
-/// Every agent in the groups of the priority view: marked TODO, done (blocked
-/// first), working, idle, unknown; inside TODO the same states in the same
-/// order; the latest change first within each state.
+/// Every agent in the groups of the priority view: marked TODO, asking (blocked
+/// first), held by a limit, done, working, idle, unknown; inside TODO the same
+/// states in the same order; the latest change first within each state.
 pub(super) fn priority_agent_order(snapshot: &ClientShellSnapshot) -> Vec<String> {
     let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
     agents.sort_by_key(|agent| {
         (
-            AgentGroup::of(agent.agent_status, agent_is_todo(agent)),
-            AgentGroup::of(agent.agent_status, false),
+            AgentGroup::of_agent(agent, false),
+            AgentGroup::of_agent(agent, true),
             attention_rank(agent.agent_status),
             std::cmp::Reverse(agent.state_change_seq),
         )
@@ -1081,16 +1209,18 @@ pub(super) fn priority_agent_order(snapshot: &ClientShellSnapshot) -> Vec<String
         .collect()
 }
 
-/// The agents waiting for a person, most urgent first: blocked, done, idle;
-/// agents marked TODO are left out. What "next waiting agent" walks.
+/// The agents waiting for a person, most urgent first: asking (blocked first),
+/// held by a limit, done, idle; agents marked TODO are left out. What "next
+/// waiting agent" walks.
 pub(super) fn waiting_agent_order(snapshot: &ClientShellSnapshot) -> Vec<String> {
     let mut agents = snapshot
         .agents
         .iter()
-        .filter(|agent| AgentGroup::of(agent.agent_status, agent_is_todo(agent)).waits())
+        .filter(|agent| AgentGroup::of_agent(agent, false).waits())
         .collect::<Vec<_>>();
     agents.sort_by_key(|agent| {
         (
+            AgentGroup::of_agent(agent, false),
             attention_rank(agent.agent_status),
             std::cmp::Reverse(agent.state_change_seq),
         )
@@ -1103,7 +1233,8 @@ pub(super) fn waiting_agent_order(snapshot: &ClientShellSnapshot) -> Vec<String>
 
 /// The agents list of a sidebar with folders: the folder tree (agents in
 /// their spaces' order inside each folder), or, sorted by priority, everyone
-/// in the groups todo, done, working, idle and other, with TODO split again
+/// in the groups todo, question, limit, done, working, idle and other, with
+/// TODO split again
 /// by those states under heads of their own.
 pub(super) fn agent_panel_rows(
     snapshot: &ClientShellSnapshot,
@@ -1111,13 +1242,62 @@ pub(super) fn agent_panel_rows(
     by_priority: bool,
     filter: &SidebarFilter,
 ) -> Vec<AgentListRow> {
-    if !by_priority {
+    let mut rows = if by_priority {
+        priority_rows(snapshot, folders, filter)
+    } else {
         let order = super::agent_sidebar::ordered_agent_pane_ids(
             snapshot,
             crate::config::AgentPanelSortConfig::Spaces,
         );
-        return agent_list_rows(snapshot, &order, folders, filter);
+        agent_list_rows(snapshot, &order, folders, filter)
+    };
+    rows.extend(closed_rows(folders, filter));
+    rows
+}
+
+/// The closed agents under a head of their own at the end of the list, newest
+/// first. The group stays folded until opened: "closed" in `collapsed_groups`
+/// marks it open.
+fn closed_rows(folders: &SidebarFolders, filter: &SidebarFilter) -> Vec<AgentListRow> {
+    let mut closed = folders
+        .closed
+        .iter()
+        .filter(|(_, agent)| {
+            !filter.is_active()
+                || filter.matches(&format!(
+                    "{} {} closed",
+                    agent.title,
+                    agent.folder.as_deref().unwrap_or_default()
+                ))
+        })
+        .collect::<Vec<_>>();
+    if closed.is_empty() {
+        return Vec::new();
     }
+    closed.sort_by_key(|(key, agent)| (std::cmp::Reverse(agent.closed_at), (*key).clone()));
+    let head = GroupHead::group(AgentGroup::Closed);
+    let collapsed = !filter.is_active() && !folders.collapsed_groups.contains(&head.key());
+    let mut rows = vec![AgentListRow::Group {
+        head,
+        count: closed.len(),
+        status: AgentStatus::Unknown,
+        collapsed,
+    }];
+    if !collapsed {
+        rows.extend(
+            closed
+                .into_iter()
+                .map(|(key, _)| AgentListRow::Closed { key: key.clone() }),
+        );
+    }
+    rows
+}
+
+fn priority_rows(
+    snapshot: &ClientShellSnapshot,
+    folders: &SidebarFolders,
+    filter: &SidebarFilter,
+) -> Vec<AgentListRow> {
     let agents = priority_agent_order(snapshot)
         .into_iter()
         .filter_map(|pane_id| {
@@ -1128,9 +1308,9 @@ pub(super) fn agent_panel_rows(
             let folder = folders.agent_folder(&agent.pane_id, &agent.workspace_id);
             (!filter.is_active() || filter.matches(&agent_text(snapshot, agent, folder))).then(
                 || {
-                    let group = AgentGroup::of(agent.agent_status, agent_is_todo(agent));
-                    let state = (group == AgentGroup::Todo)
-                        .then(|| AgentGroup::of(agent.agent_status, false));
+                    let group = AgentGroup::of_agent(agent, false);
+                    let state =
+                        (group == AgentGroup::Todo).then(|| AgentGroup::of_agent(agent, true));
                     (pane_id, group, state, agent.agent_status)
                 },
             )
@@ -1451,6 +1631,7 @@ mod tests {
             focused,
             status: AgentStatus::Idle,
             todo: false,
+            attention: Attention::None,
         }
     }
 

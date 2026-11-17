@@ -17,6 +17,8 @@ pub(super) struct AgentRow {
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
     /// Set while the person has marked this agent TODO.
     pub(super) todo: Option<AgentRowTodo>,
+    /// What the server read from a Claude agent's transcript.
+    pub(super) insight: super::agent_insight_view::AgentInsightView,
 }
 
 pub(super) struct AgentRowTodo {
@@ -104,6 +106,7 @@ pub(super) fn ordered_agent_pane_ids(
 enum AgentPanelRow {
     Folder(super::folders::FolderRow),
     Agent(AgentRow, u16),
+    Closed(String, super::folders::ClosedAgent),
     Group {
         head: super::folders::GroupHead,
         count: usize,
@@ -194,6 +197,11 @@ pub(super) fn render_agent_panel(
                         agent_row(snapshot, &pane_id, config, None)
                             .map(|row| AgentPanelRow::Agent(row, depth))
                     }
+                    super::folders::AgentListRow::Closed { key } => folders
+                        .closed
+                        .get(&key)
+                        .cloned()
+                        .map(|closed| AgentPanelRow::Closed(key, closed)),
                     super::folders::AgentListRow::Group {
                         head,
                         count,
@@ -244,7 +252,7 @@ pub(super) fn render_agent_panel(
         agent_scroll,
         hits,
         |row| match row {
-            AgentPanelRow::Folder(_) | AgentPanelRow::Group { .. } => 1,
+            AgentPanelRow::Folder(_) | AgentPanelRow::Group { .. } | AgentPanelRow::Closed(..) => 1,
             AgentPanelRow::Agent(row, _) => row.rows.len(),
         },
         |buffer, rect, row, hits| match row {
@@ -260,6 +268,10 @@ pub(super) fn render_agent_panel(
                 hits.agents.push((rect, row.pane_id.clone()));
                 let dragged = view.dragged_agent == Some(row.pane_id.as_str());
                 render_agent_row_at(buffer, rect, row, *depth, dragged, config);
+            }
+            AgentPanelRow::Closed(key, closed) => {
+                hits.closed_agents.push((rect, key.clone()));
+                render_closed_row(buffer, rect, closed, config);
             }
             AgentPanelRow::Group {
                 head,
@@ -288,13 +300,15 @@ fn render_group_row(
 ) {
     let palette = &config.palette;
     let inner = head.state.is_some();
-    let (icon, color) = if !inner && head.group == super::folders::AgentGroup::Todo {
-        ("▌", palette.mauve)
-    } else {
-        (
+    let (icon, color) = match head.state.unwrap_or(head.group) {
+        super::folders::AgentGroup::Todo => ("▌", palette.mauve),
+        super::folders::AgentGroup::Question => (QUESTION_ICON, palette.red),
+        super::folders::AgentGroup::Limit => (LIMIT_ICON, palette.peach),
+        super::folders::AgentGroup::Closed => (CLOSED_ICON, palette.overlay0),
+        _ => (
             status_icon(status, config.status_indicators),
             status_color(status, palette),
-        )
+        ),
     };
     let label = format!(
         "{} {} {icon} {} {count} ",
@@ -684,6 +698,7 @@ pub(super) fn agent_row(
         focused: agent.focused,
         rows,
         todo: agent_todo(agent),
+        insight: super::agent_insight_view::AgentInsightView::of(agent),
     })
 }
 
@@ -727,10 +742,14 @@ pub(super) fn render_agent_row_at(
     };
     let status_style = Style::default().fg(status_color(row.status, palette));
     let secondary = Style::default().fg(palette.overlay0);
-    let icon = (
-        status_icon(row.status, config.status_indicators),
-        Style::default().fg(status_color(row.status, palette)),
-    );
+    let icon = if row.insight.asks && row.status != crate::api::schema::AgentStatus::Blocked {
+        (QUESTION_ICON, Style::default().fg(palette.red))
+    } else {
+        (
+            status_icon(row.status, config.status_indicators),
+            Style::default().fg(status_color(row.status, palette)),
+        )
+    };
     let rows = if row.rows.is_empty() {
         vec![vec![crate::ui::ResolvedToken {
             kind: crate::ui::ResolvedTokenKind::StateIcon,
@@ -740,19 +759,15 @@ pub(super) fn render_agent_row_at(
         row.rows.clone()
     };
     let line_count = rows.len().min(rect.height as usize);
-    let reminder = row
-        .todo
-        .as_ref()
-        .and_then(|todo| todo.reminder.as_deref())
-        .map(|reminder| format!("◷ {reminder} "));
+    let row_badge = row_badge(row, palette);
     for (index, tokens) in rows.iter().take(line_count).enumerate() {
         let indent = depth_indent + if index == 0 { 1 } else { 3 };
-        // The reminder sits at the right end of the last line.
-        let badge = reminder
-            .as_deref()
+        // The badge sits at the right end of the last line.
+        let badge = row_badge
+            .as_ref()
             .filter(|_| index + 1 == line_count)
-            .filter(|badge| display_width(badge) + indent + 4 <= rect.width as usize);
-        let badge_width = badge.map_or(0, display_width) as u16;
+            .filter(|(badge, _)| display_width(badge) + indent + 4 <= rect.width as usize);
+        let badge_width = badge.map_or(0, |(badge, _)| display_width(badge)) as u16;
         let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
         spans.extend(crate::ui::resolved_token_spans(
             tokens,
@@ -768,22 +783,98 @@ pub(super) fn render_agent_row_at(
         Paragraph::new(Line::from(spans))
             .style(row_style)
             .render(Rect::new(rect.x, y, rect.width, 1), buffer);
-        if row.todo.is_none() {
-            continue;
+        if row.todo.is_some() {
+            let mark = row_style.fg(palette.mauve).add_modifier(Modifier::BOLD);
+            put_text(buffer, rect.x, y, 1, "▌", mark);
         }
-        let mark = row_style.fg(palette.mauve).add_modifier(Modifier::BOLD);
-        put_text(buffer, rect.x, y, 1, "▌", mark);
-        if let Some(badge) = badge {
+        if let Some((badge, color)) = badge {
             put_text(
                 buffer,
                 rect.right().saturating_sub(badge_width),
                 y,
                 badge_width,
                 badge,
-                mark,
+                row_style.fg(*color).add_modifier(Modifier::BOLD),
             );
         }
     }
+}
+
+/// What marks an agent that asks the person something.
+pub(super) const QUESTION_ICON: &str = "?";
+/// What marks an agent a usage limit holds.
+pub(super) const LIMIT_ICON: &str = "⏸";
+/// What marks an agent whose tab was closed.
+pub(super) const CLOSED_ICON: &str = "×";
+
+/// A closed agent: its title and how long ago it closed, dimmed. A click
+/// opens it again.
+fn render_closed_row(
+    buffer: &mut Buffer,
+    rect: Rect,
+    closed: &super::folders::ClosedAgent,
+    config: &ClientShellConfig,
+) {
+    let palette = &config.palette;
+    let style = Style::default().fg(palette.overlay0);
+    let age = closed_age(crate::pane_todo::unix_now().saturating_sub(closed.closed_at));
+    let age_width = display_width(&age) as u16 + 1;
+    put_text(buffer, rect.x + 1, rect.y, 2, CLOSED_ICON, style);
+    let title_width = rect.width.saturating_sub(3 + age_width + 1);
+    put_text(
+        buffer,
+        rect.x + 3,
+        rect.y,
+        title_width,
+        &closed.title,
+        style,
+    );
+    if rect.width > age_width + 12 {
+        put_text(
+            buffer,
+            rect.right().saturating_sub(age_width),
+            rect.y,
+            age_width,
+            &age,
+            style.add_modifier(Modifier::DIM),
+        );
+    }
+}
+
+/// "5m", "3h", "2d".
+fn closed_age(seconds: u64) -> String {
+    match seconds {
+        0..3600 => format!("{}m", (seconds / 60).max(1)),
+        3600..86_400 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+/// The one badge at the right end of an agent row, the most pressing first:
+/// when a limit lifts ("⏸ 18:30"), a TODO reminder ("◷ Thu 09:00"), a large
+/// context ("212k").
+fn row_badge(row: &AgentRow, palette: &Palette) -> Option<(String, ratatui::style::Color)> {
+    use super::agent_insight_view as view;
+
+    if let Some(hit) = row.insight.limit {
+        return Some((
+            format!("{LIMIT_ICON} {} ", view::limit_label(hit)),
+            palette.peach,
+        ));
+    }
+    if let Some(reminder) = row.todo.as_ref().and_then(|todo| todo.reminder.as_deref()) {
+        return Some((format!("◷ {reminder} "), palette.mauve));
+    }
+    let context = row
+        .insight
+        .context
+        .filter(|tokens| *tokens >= view::CONTEXT_SHOWN_FROM)?;
+    let color = if context >= view::CONTEXT_WARN_FROM {
+        palette.peach
+    } else {
+        palette.overlay0
+    };
+    Some((format!("{} ", view::format_tokens(context)), color))
 }
 
 fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {

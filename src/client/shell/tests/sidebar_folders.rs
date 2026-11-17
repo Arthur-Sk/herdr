@@ -672,8 +672,8 @@ fn priority_view_puts_done_then_working_then_the_rest() {
     let text = compose(&mut state);
     assert!(text.contains("priority"), "{text}");
     assert_eq!(shown_agents(&state), ["w3:p1", "w1:p1", "w2:p1"]);
-    // Blocked goes with done: both stopped and wait for a person.
-    let done = text.lines().position(|line| line.contains("done 1"));
+    // Blocked heads the waiting ones: it stopped on a prompt for a person.
+    let done = text.lines().position(|line| line.contains("question 1"));
     let working = text.lines().position(|line| line.contains("working 1"));
     let other = text.lines().position(|line| line.contains("other 1"));
     assert!(
@@ -892,16 +892,16 @@ fn todo_group_splits_into_done_then_working_then_idle() {
 
     let text = compose(&mut state);
     let line_of = |needle: &str| text.lines().position(|line| line.contains(needle));
-    let heads = ["todo 4", "done 2", "working 1", "idle 1"].map(line_of);
+    let heads = ["todo 4", "question 1", "done 1", "working 1", "idle 1"].map(line_of);
     assert!(
         heads.iter().all(Option::is_some) && heads.is_sorted(),
         "{heads:?}\n{text}"
     );
-    // Blocked first among the finished ones, as in the done group.
+    // Blocked under question, before the finished one, as outside TODO.
     assert_eq!(shown_agents(&state), ["w3:p1", "w3:p2", "w2:p1", "w1:p1"]);
 
     // A state inside TODO folds on its own.
-    let (head, _) = state.hits.agent_groups[2];
+    let (head, _) = state.hits.agent_groups[3];
     click(&mut state, (head.x + 4, head.y));
     assert!(state.folders.collapsed_groups.contains("todo/working"));
     let text = compose(&mut state);
@@ -913,7 +913,7 @@ fn todo_group_splits_into_done_then_working_then_idle() {
     click(&mut state, (head.x + 2, head.y));
     let text = compose(&mut state);
     assert!(text.contains("▸ ▌ todo 4"), "{text}");
-    assert!(!text.contains("done 2"), "{text}");
+    assert!(!text.contains("question 1"), "{text}");
     assert!(shown_agents(&state).is_empty());
 }
 

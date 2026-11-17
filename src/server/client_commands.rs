@@ -259,6 +259,19 @@ mod tests {
             actual.remove("pane.todo.set").as_deref(),
             Some("2acaf85740555ca212ee7b22d55bdde7ee26218db144fcb9d4fce2d72bf41eaa")
         );
+        // Fork-only methods: acting on Claude agents, closing and reopening them.
+        assert_eq!(
+            actual.remove("pane.agent.act").as_deref(),
+            Some("e12a200074da59363b991eb0733fe74fa287b322c3e300d445d4d9d804d929bb")
+        );
+        assert_eq!(
+            actual.remove("agent.sweep").as_deref(),
+            Some("82421d69e988e971c65ed94f6d027d10c871b5d16a8ff2cd78a7d04934c5df54")
+        );
+        assert_eq!(
+            actual.remove("agent.reopen").as_deref(),
+            Some("af7c56de7ad3e3b33c2ef8fe82f5775ab15bccaa3ac4ba3a70ac40d91f60a31e")
+        );
 
         assert_eq!(
             actual, expected,

@@ -31,6 +31,30 @@ fn push_todo_tokens(app: &app::App, pane_id: &str, tokens: &mut Vec<(String, Str
     }
 }
 
+/// Carries what a Claude agent's transcript says to the TUI as reserved agent
+/// tokens (see `crate::agent_insight`).
+fn push_insight_tokens(
+    app: &app::App,
+    pane_id: &str,
+    logins_json: &str,
+    tokens: &mut Vec<(String, String)>,
+) {
+    tokens.retain(|(key, _)| !crate::agent_insight::ALL_TOKENS.contains(&key.as_str()));
+    let Some(terminal) = app
+        .parse_pane_id(pane_id)
+        .and_then(|(workspace_index, pane_id)| {
+            app.state
+                .workspaces
+                .get(workspace_index)?
+                .terminal_id(pane_id)
+        })
+        .and_then(|terminal_id| app.state.terminals.get(terminal_id))
+    else {
+        return;
+    };
+    tokens.extend(app.agent_insight_tokens(terminal, logins_json));
+}
+
 #[cfg(test)]
 pub(super) fn snapshot(
     app: &app::App,
@@ -176,6 +200,7 @@ pub(super) fn snapshot_with_completions(
             }
         })
         .collect();
+    let logins_json = serde_json::to_string(&app.claude_login_statuses()).unwrap_or_default();
     let agents = snapshot
         .agents
         .into_iter()
@@ -186,6 +211,7 @@ pub(super) fn snapshot_with_completions(
             state_labels.sort_by(|left, right| left.0.cmp(&right.0));
             let mut tokens = agent.tokens.into_iter().collect::<Vec<_>>();
             push_todo_tokens(app, &pane_id, &mut tokens);
+            push_insight_tokens(app, &pane_id, &logins_json, &mut tokens);
             tokens.sort_by(|left, right| left.0.cmp(&right.0));
             protocol::ClientShellAgent {
                 pane_id,

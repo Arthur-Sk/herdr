@@ -353,7 +353,7 @@ fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
     )
 }
 
-fn shell_command_from_argv(argv: &[String]) -> Option<String> {
+pub(super) fn shell_command_from_argv(argv: &[String]) -> Option<String> {
     let mut parts = argv.iter();
     let first = shell_quote(parts.next()?);
     let mut command = first;

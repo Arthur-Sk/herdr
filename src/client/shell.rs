@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 mod actions;
+mod agent_card;
+mod agent_insight_view;
+mod agent_menu;
 mod agent_sidebar;
 mod aggregate_navigation;
 mod machine_diagnostics;

@@ -94,6 +94,8 @@ pub(super) struct ShellHitMap {
     pub(super) popup: Option<PaneHit>,
     pub(super) pane_splits: Vec<PaneSplitHit>,
     pub(super) agents: Vec<(Rect, String)>,
+    /// Rows of closed agents, by their key in `SidebarFolders::closed`.
+    pub(super) closed_agents: Vec<(Rect, String)>,
     pub(super) folders: Vec<FolderHit>,
     pub(super) spaces_header: Rect,
     pub(super) agents_header: Rect,
@@ -631,6 +633,44 @@ pub(super) enum ClientContextMenuAction {
     MoveFolderDown,
     ToggleAgentView,
     ToggleMuteFolder,
+    /// Stop showing an agent's last message as a question.
+    DismissQuestion,
+    /// Pick a login to relaunch the agents under (opens the login menu).
+    RelaunchAs,
+    /// Pick a login to open a closed agent under (opens the login menu).
+    ReopenAs,
+    /// The login at this index of the login menu.
+    PickLogin(usize),
+    ContinueAfterReset,
+    StopContinueAfterReset,
+    Compact,
+    FinishAgent,
+    /// Close the tabs Claude sessions left behind when they exited.
+    CloseFinishedTabs,
+    Reopen,
+    Forget,
+    ForgetAllClosed,
+    /// Step back the last change to folders, filing, order or closed agents.
+    UndoLayout,
+}
+
+/// What a Claude agent's menu can offer, from what the server reads of it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct AgentInsightMenu {
+    pub(super) asks: bool,
+    pub(super) limited: bool,
+    pub(super) continue_after_reset: bool,
+    /// Its context is known and it is not working: a /compact can go in.
+    pub(super) compact: bool,
+    /// The command that resumes it is known and other logins exist.
+    pub(super) relaunch: bool,
+}
+
+/// What a login picked in the login menu is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum LoginPurpose {
+    Relaunch { pane_ids: Vec<String> },
+    Reopen { key: String },
 }
 
 /// What a folder dialog files: a space (by the first row of its worktree
@@ -689,17 +729,42 @@ pub(super) enum ClientContextMenuTarget {
         workspace_id: String,
         todo: Option<PaneTodoMenu>,
         filed_apart: bool,
+        /// Present for a Claude agent on a server that acts on agents.
+        insight: Option<AgentInsightMenu>,
+        folders: bool,
     },
     Folder {
         section: super::folders::FolderSection,
         path: String,
         muted: bool,
+        /// Waiting Claude agents inside with a context over 250k.
+        compact: Vec<String>,
     },
     /// The header or empty space of the spaces or agents list.
     SidebarSection {
         section: super::folders::FolderSection,
         filtered: bool,
         agents_by_priority: bool,
+        /// The server closes tabs Claude sessions left behind.
+        sweep: bool,
+        undo: bool,
+        closed: bool,
+    },
+    /// The head of a priority group, with the agents in it.
+    AgentGroup {
+        head: super::folders::GroupHead,
+        pane_ids: Vec<String>,
+        relaunch: bool,
+    },
+    ClosedAgent {
+        key: String,
+        relaunch: bool,
+    },
+    /// The logins to pick from, each with what is known of its limits.
+    Logins {
+        purpose: LoginPurpose,
+        logins: Vec<String>,
+        labels: Vec<String>,
     },
 }
 
@@ -712,7 +777,7 @@ pub(super) struct ClientContextMenuOverlay {
 }
 
 pub(super) struct ClientContextMenuItem {
-    pub(super) label: &'static str,
+    pub(super) label: std::borrow::Cow<'static, str>,
     pub(super) action: ClientContextMenuAction,
 }
 
@@ -826,6 +891,15 @@ pub(super) enum PendingEndpointKind {
         repeat: bool,
         generation: u64,
         session_generation: u64,
+    },
+    /// Closes agents; the result lists them, kept in the folders they sat in
+    /// (by pane id).
+    CloseAgents {
+        folders: Vec<(String, Option<String>)>,
+    },
+    /// Opens a closed agent again; on success it leaves the closed list.
+    ReopenAgent {
+        key: String,
     },
 }
 
@@ -1078,6 +1152,13 @@ pub(crate) struct ClientShellState {
     pub(super) previous_pane_id: Option<String>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
+    /// The agent row the pointer rests on, for its card.
+    pub(super) agent_hover: Option<super::agent_card::AgentHover>,
+    /// Earlier sidebar layouts, the latest last, for undo.
+    pub(super) layout_undo: Vec<super::folders::SidebarFolders>,
+    /// The layout as of the last save, which undo goes back to when the
+    /// next save changes it.
+    pub(super) layout_undo_mark: Option<super::folders::SidebarFolders>,
     pub(super) url_click_consumes_until_up: bool,
     /// The host terminal reports key releases (Kitty event types), so text
     /// presses can be tracked until their release arrives.
@@ -1262,6 +1343,9 @@ impl ClientShellState {
             previous_pane_id: None,
             pane_mouse_gesture: None,
             link_hover: None,
+            agent_hover: None,
+            layout_undo: Vec::new(),
+            layout_undo_mark: None,
             url_click_consumes_until_up: false,
             host_reports_key_releases: false,
             host_erase_byte: None,
@@ -1310,6 +1394,7 @@ impl ClientShellState {
             dismissed_product_announcement: None,
         };
         state.layout_base = Some(state.chrome_preferences());
+        state.layout_undo_mark = Some(state.folders.clone());
         state.layout_stamp = state
             .config
             .preferences_path

@@ -3376,6 +3376,8 @@ impl HeadlessServer {
             changed = true;
         }
 
+        changed |= self.app.refresh_agent_insights(now);
+
         if self.app.todo_reminder_due.is_some() {
             let reminders = self
                 .app

@@ -91,6 +91,10 @@ pub enum ResponseResult {
         tab: TabInfo,
         root_pane: PaneInfo,
     },
+    /// Agents whose panes closed (fork: `agent.sweep`, `pane.agent.act` finish).
+    ClosedAgents {
+        agents: Vec<super::panes::ClosedAgentInfo>,
+    },
     TabList {
         tabs: Vec<TabInfo>,
     },

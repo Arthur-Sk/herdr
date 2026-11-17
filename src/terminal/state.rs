@@ -164,6 +164,10 @@ pub struct TerminalState {
     pub restore_error: Option<String>,
     /// Set while a person has marked this terminal's agent TODO; cleared only by hand.
     pub todo: Option<TerminalTodo>,
+    /// What the transcript of the Claude session here says (fork).
+    pub(crate) insight: crate::agent_insight::AgentInsightState,
+    /// An exit the person asked for and what follows it (fork).
+    pub(crate) pending_agent_exit: Option<crate::agent_insight::PendingAgentExit>,
 }
 
 /// A person's TODO mark on a terminal, with an optional reminder.
@@ -212,6 +216,8 @@ impl TerminalState {
             pending_agent_resume_plan: None,
             restore_error: None,
             todo: None,
+            insight: Default::default(),
+            pending_agent_exit: None,
         }
     }
 
@@ -1926,6 +1932,15 @@ impl TerminalState {
             session_ref_changed: previous_session != current_session,
             agent_released: true,
         })
+    }
+
+    /// The id of the Claude session this terminal runs or last ran.
+    pub(crate) fn claude_session_id(&self) -> Option<String> {
+        self.current_session_identity_for_persistence()
+            .filter(|(_, agent, kind, _)| {
+                agent == "claude" && *kind == crate::agent_resume::AgentSessionRefKind::Id
+            })
+            .map(|(_, _, _, value)| value)
     }
 
     pub fn session_ref_is_current(

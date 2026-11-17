@@ -2350,6 +2350,7 @@ async fn run_client_loop(
                             | shell.tick_copy_feedback(now)
                             | shell.tick_workspace_highlight(now)
                             | shell.tick_endpoint_error(now)
+                            | shell.tick_agent_hover(now)
                             | shell.tick_layout_sync(now);
                         let frame = outcome
                             .repaint

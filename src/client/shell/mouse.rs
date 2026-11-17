@@ -2001,6 +2001,29 @@ impl ClientShellState {
                     }
                     return;
                 }
+                let group = self
+                    .hits
+                    .agent_groups
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, head)| *head);
+                if let Some(head) = group {
+                    if self.open_agent_group_context_menu(head, mouse.column, mouse.row) {
+                        outcome.repaint = true;
+                        return;
+                    }
+                }
+                let closed = self
+                    .hits
+                    .closed_agents
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, key)| key.clone());
+                if let Some(key) = closed {
+                    self.open_closed_agent_context_menu(key, mouse.column, mouse.row);
+                    outcome.repaint = true;
+                    return;
+                }
                 let section = if super::contains(self.hits.spaces_header, point)
                     || super::contains(self.hits.workspace_body, point)
                 {
@@ -2259,6 +2282,17 @@ impl ClientShellState {
                 {
                     self.folders.toggle_group(group);
                     self.persist_chrome_preferences(outcome);
+                    outcome.repaint = true;
+                    return;
+                }
+                if let Some(key) = self
+                    .hits
+                    .closed_agents
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, key)| key.clone())
+                {
+                    self.reopen_closed_agent(&key, None, outcome);
                     outcome.repaint = true;
                     return;
                 }

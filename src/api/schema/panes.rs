@@ -375,6 +375,70 @@ crate::cli::projection::cli_params! {
     }
 }
 
+/// What `pane.agent.act` does to the Claude agent in a pane (fork).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneAgentAction {
+    /// Stop showing the agent's last message as a question.
+    DismissQuestion,
+    /// Exit the agent and resume its session under `login`.
+    Relaunch,
+    /// Send `text` once the agent's usage limit lifts (`on`), or stop that.
+    ContinueAfterReset,
+    /// Submit `text` (a prompt or a slash command) while the agent waits.
+    Send,
+    /// Exit the agent and close its pane; the result says how to resume it.
+    Finish,
+}
+
+/// Acts on the Claude agent in a pane (fork).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneAgentActParams {
+    pub pane_id: String,
+    pub action: PaneAgentAction,
+    /// The login (`claude` or `claude-<id>`) a relaunch runs under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
+    /// What `send` submits, or what `continue_after_reset` sends later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Turns `continue_after_reset` on or off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<bool>,
+}
+
+/// Closes the panes Claude sessions left behind when they exited (fork).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentSweepParams {
+    /// Only report what would close.
+    #[serde(default, skip_serializing_if = "crate::api::schema::is_false")]
+    pub dry_run: bool,
+}
+
+/// Opens a closed agent again: a new tab that resumes its session (fork).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentReopenParams {
+    /// Where the tab opens; the focused workspace when missing or gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    pub cwd: String,
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// An agent whose pane closed, with what resumes it (fork).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ClosedAgentInfo {
+    pub pane_id: String,
+    pub workspace_id: String,
+    pub title: String,
+    pub cwd: String,
+    pub argv: Vec<String>,
+    /// Unix seconds.
+    pub closed_at: u64,
+}
+
 crate::cli::projection::cli_params! {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
     pub struct PaneSendTextParams => PaneSendTextProjection {
