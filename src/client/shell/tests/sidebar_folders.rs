@@ -816,8 +816,9 @@ fn todo_agents_get_their_own_group_and_groups_fold() {
     );
     assert_eq!(shown_agents(&state), ["w3:p1", "w1:p1", "w2:p1"]);
 
-    // A click folds a group to its head, kept in the preferences.
-    let (head, _) = state.hits.agent_groups[1];
+    // A click folds a group to its head, kept in the preferences. The heads
+    // are todo, its "idle" inside, then the idle group.
+    let (head, _) = state.hits.agent_groups[2];
     click(&mut state, (head.x + 2, head.y));
     assert!(state.folders.collapsed_groups.contains("idle"));
     let text = compose(&mut state);
@@ -854,13 +855,66 @@ fn priority_view_shows_todo_then_finished_then_working_then_idle() {
     state.set_snapshot(snapshot);
 
     let text = compose(&mut state);
-    let line_of = |needle: &str| text.lines().position(|line| line.contains(needle));
+    // Top-level heads only: the states inside TODO stand indented.
+    let line_of = |needle: &str| {
+        text.lines()
+            .position(|line| line.starts_with(" ▾") && line.contains(needle))
+    };
     let heads = ["todo 1", "done 1", "working 1", "idle 1"].map(line_of);
     assert!(
         heads.iter().all(Option::is_some) && heads.is_sorted(),
         "{heads:?}\n{text}"
     );
     assert_eq!(shown_agents(&state), ["w3:p1", "w3:p2", "w2:p1", "w1:p1"]);
+}
+
+#[test]
+fn todo_group_splits_into_done_then_working_then_idle() {
+    let mut state = state_with(SidebarFolders::default());
+    state.config.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+    let mut snapshot = state.snapshot.clone().unwrap();
+    let mut second = snapshot.panes[2].clone();
+    second.pane_id = "w3:p2".into();
+    snapshot.panes.push(second);
+    let mut notes = agent("w3", "notes", false);
+    notes.pane_id = "w3:p2".into();
+    snapshot.agents.push(notes);
+    for agent in &mut snapshot.agents {
+        agent.tokens.push(todo_token());
+    }
+    snapshot.agents[1].agent_status = AgentStatus::Working;
+    snapshot.agents[2].agent_status = AgentStatus::Blocked;
+    snapshot.agents[3].agent_status = AgentStatus::Working;
+    state.set_snapshot(snapshot.clone());
+    // w3:p2 finishes while nobody looks at it: done, not idle.
+    snapshot.agents[3].agent_status = AgentStatus::Idle;
+    state.set_snapshot(snapshot);
+
+    let text = compose(&mut state);
+    let line_of = |needle: &str| text.lines().position(|line| line.contains(needle));
+    let heads = ["todo 4", "done 2", "working 1", "idle 1"].map(line_of);
+    assert!(
+        heads.iter().all(Option::is_some) && heads.is_sorted(),
+        "{heads:?}\n{text}"
+    );
+    // Blocked first among the finished ones, as in the done group.
+    assert_eq!(shown_agents(&state), ["w3:p1", "w3:p2", "w2:p1", "w1:p1"]);
+
+    // A state inside TODO folds on its own.
+    let (head, _) = state.hits.agent_groups[2];
+    click(&mut state, (head.x + 4, head.y));
+    assert!(state.folders.collapsed_groups.contains("todo/working"));
+    let text = compose(&mut state);
+    assert!(text.contains("▸") && text.contains("working 1"), "{text}");
+    assert_eq!(shown_agents(&state), ["w3:p1", "w3:p2", "w1:p1"]);
+
+    // Folding TODO hides its inner heads too.
+    let (head, _) = state.hits.agent_groups[0];
+    click(&mut state, (head.x + 2, head.y));
+    let text = compose(&mut state);
+    assert!(text.contains("▸ ▌ todo 4"), "{text}");
+    assert!(!text.contains("done 2"), "{text}");
+    assert!(shown_agents(&state).is_empty());
 }
 
 #[test]

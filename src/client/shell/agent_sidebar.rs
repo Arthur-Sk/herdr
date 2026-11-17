@@ -105,7 +105,7 @@ enum AgentPanelRow {
     Folder(super::folders::FolderRow),
     Agent(AgentRow, u16),
     Group {
-        group: super::folders::AgentGroup,
+        head: super::folders::GroupHead,
         count: usize,
         status: crate::api::schema::AgentStatus,
         collapsed: bool,
@@ -195,12 +195,12 @@ pub(super) fn render_agent_panel(
                             .map(|row| AgentPanelRow::Agent(row, depth))
                     }
                     super::folders::AgentListRow::Group {
-                        group,
+                        head,
                         count,
                         status,
                         collapsed,
                     } => Some(AgentPanelRow::Group {
-                        group,
+                        head,
                         count,
                         status,
                         collapsed,
@@ -262,31 +262,33 @@ pub(super) fn render_agent_panel(
                 render_agent_row_at(buffer, rect, row, *depth, dragged, config);
             }
             AgentPanelRow::Group {
-                group,
+                head,
                 count,
                 status,
                 collapsed,
             } => {
-                hits.agent_groups.push((rect, *group));
-                render_group_row(buffer, rect, *group, *count, *status, *collapsed, config);
+                hits.agent_groups.push((rect, *head));
+                render_group_row(buffer, rect, *head, *count, *status, *collapsed, config);
             }
         },
     );
 }
 
 /// The head of a priority group: "● done 5", coloured by its most urgent
-/// state, with a rule to the edge.
+/// state, with a rule to the edge. A state inside TODO gets a smaller head,
+/// indented under the TODO one.
 fn render_group_row(
     buffer: &mut Buffer,
     rect: Rect,
-    group: super::folders::AgentGroup,
+    head: super::folders::GroupHead,
     count: usize,
     status: crate::api::schema::AgentStatus,
     collapsed: bool,
     config: &ClientShellConfig,
 ) {
     let palette = &config.palette;
-    let (icon, color) = if group == super::folders::AgentGroup::Todo {
+    let inner = head.state.is_some();
+    let (icon, color) = if !inner && head.group == super::folders::AgentGroup::Todo {
         ("▌", palette.mauve)
     } else {
         (
@@ -295,18 +297,24 @@ fn render_group_row(
         )
     };
     let label = format!(
-        " {} {icon} {} {count} ",
+        "{} {} {icon} {} {count} ",
+        if inner { "  " } else { "" },
         if collapsed { "▸" } else { "▾" },
-        group.label()
+        head.label()
     );
     let width = display_width(&label).min(rect.width as usize) as u16;
+    let style = Style::default().fg(color);
     put_text(
         buffer,
         rect.x,
         rect.y,
         width,
         &label,
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
+        if inner {
+            style
+        } else {
+            style.add_modifier(Modifier::BOLD)
+        },
     );
     let rule = rect.width.saturating_sub(width + 1);
     put_text(

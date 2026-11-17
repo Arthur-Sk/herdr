@@ -131,7 +131,7 @@ pub(super) struct ShellHitMap {
     pub(super) worktree_rows: Vec<(Rect, usize)>,
     pub(super) folder_choice_rows: Vec<(Rect, usize)>,
     /// Heads of the priority view's groups; a click folds one.
-    pub(super) agent_groups: Vec<(Rect, super::folders::AgentGroup)>,
+    pub(super) agent_groups: Vec<(Rect, super::folders::GroupHead)>,
     pub(super) folder_picker_popup: Rect,
     pub(super) help_popup: Rect,
     pub(super) help_scrollbar: Rect,

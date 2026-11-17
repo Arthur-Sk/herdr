@@ -471,9 +471,10 @@ impl SidebarFolders {
         }
     }
 
-    pub(super) fn toggle_group(&mut self, group: AgentGroup) {
-        if !self.collapsed_groups.remove(group.label()) {
-            self.collapsed_groups.insert(group.label().to_owned());
+    pub(super) fn toggle_group(&mut self, head: GroupHead) {
+        let key = head.key();
+        if !self.collapsed_groups.remove(&key) {
+            self.collapsed_groups.insert(key);
         }
     }
 
@@ -595,9 +596,9 @@ pub(super) enum AgentListRow {
         pane_id: String,
         depth: u16,
     },
-    /// The head of a group in the priority view.
+    /// The head of a group in the priority view, or of a state inside TODO.
     Group {
-        group: AgentGroup,
+        head: GroupHead,
         count: usize,
         /// The most urgent state in the group: what colours its head.
         status: AgentStatus,
@@ -644,6 +645,35 @@ impl AgentGroup {
     /// Blocked, done or idle: the agent waits for a person.
     pub(super) fn waits(self) -> bool {
         matches!(self, Self::Done | Self::Idle)
+    }
+}
+
+/// The head of a priority group, or of a state inside the TODO group: TODO
+/// agents split again into done, working, idle and other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct GroupHead {
+    pub(super) group: AgentGroup,
+    /// The state inside the group this head stands for; none for a whole group.
+    pub(super) state: Option<AgentGroup>,
+}
+
+impl GroupHead {
+    pub(super) fn group(group: AgentGroup) -> Self {
+        Self { group, state: None }
+    }
+
+    /// What the head shows: the group's name, or the state's inside TODO.
+    pub(super) fn label(self) -> &'static str {
+        self.state.unwrap_or(self.group).label()
+    }
+
+    /// The name it folds under in `collapsed_groups`: "idle", or "todo/idle"
+    /// for the idle agents inside TODO.
+    pub(super) fn key(self) -> String {
+        match self.state {
+            Some(state) => format!("{}/{}", self.group.label(), state.label()),
+            None => self.group.label().to_owned(),
+        }
     }
 }
 
@@ -1033,12 +1063,14 @@ pub(super) fn agent_order_in_folders(
 }
 
 /// Every agent in the groups of the priority view: marked TODO, done (blocked
-/// first), working, idle, unknown; the latest change first within each state.
+/// first), working, idle, unknown; inside TODO the same states in the same
+/// order; the latest change first within each state.
 pub(super) fn priority_agent_order(snapshot: &ClientShellSnapshot) -> Vec<String> {
     let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
     agents.sort_by_key(|agent| {
         (
             AgentGroup::of(agent.agent_status, agent_is_todo(agent)),
+            AgentGroup::of(agent.agent_status, false),
             attention_rank(agent.agent_status),
             std::cmp::Reverse(agent.state_change_seq),
         )
@@ -1071,7 +1103,8 @@ pub(super) fn waiting_agent_order(snapshot: &ClientShellSnapshot) -> Vec<String>
 
 /// The agents list of a sidebar with folders: the folder tree (agents in
 /// their spaces' order inside each folder), or, sorted by priority, everyone
-/// in the groups todo, done, working, idle and other.
+/// in the groups todo, done, working, idle and other, with TODO split again
+/// by those states under heads of their own.
 pub(super) fn agent_panel_rows(
     snapshot: &ClientShellSnapshot,
     folders: &SidebarFolders,
@@ -1095,33 +1128,51 @@ pub(super) fn agent_panel_rows(
             let folder = folders.agent_folder(&agent.pane_id, &agent.workspace_id);
             (!filter.is_active() || filter.matches(&agent_text(snapshot, agent, folder))).then(
                 || {
-                    (
-                        pane_id,
-                        AgentGroup::of(agent.agent_status, agent_is_todo(agent)),
-                        agent.agent_status,
-                    )
+                    let group = AgentGroup::of(agent.agent_status, agent_is_todo(agent));
+                    let state = (group == AgentGroup::Todo)
+                        .then(|| AgentGroup::of(agent.agent_status, false));
+                    (pane_id, group, state, agent.agent_status)
                 },
             )
         })
         .collect::<Vec<_>>();
     let mut rows = Vec::new();
-    for (index, (pane_id, group, status)) in agents.iter().enumerate() {
-        let collapsed = folders.collapsed_groups.contains(group.label());
-        if index == 0 || agents[index - 1].1 != *group {
-            rows.push(AgentListRow::Group {
+    for (index, (pane_id, group, state, status)) in agents.iter().enumerate() {
+        let previous = index.checked_sub(1).map(|previous| &agents[previous]);
+        let mut heads = vec![(GroupHead::group(*group), previous.map(|p| p.1 != *group))];
+        if state.is_some() {
+            let head = GroupHead {
                 group: *group,
-                count: agents
-                    .iter()
-                    .filter(|(_, candidate, _)| candidate == group)
-                    .count(),
-                status: *status,
-                collapsed,
-            });
+                state: *state,
+            };
+            heads.push((head, previous.map(|p| (p.1, p.2) != (*group, *state))));
+        }
+        let mut collapsed = false;
+        for (head, starts) in heads {
+            let head_collapsed = folders.collapsed_groups.contains(&head.key());
+            if starts.unwrap_or(true) {
+                rows.push(AgentListRow::Group {
+                    head,
+                    count: agents
+                        .iter()
+                        .filter(|(_, other_group, other_state, _)| {
+                            *other_group == head.group
+                                && (head.state.is_none() || *other_state == head.state)
+                        })
+                        .count(),
+                    status: *status,
+                    collapsed: head_collapsed,
+                });
+            }
+            if head_collapsed {
+                collapsed = true;
+                break;
+            }
         }
         if !collapsed {
             rows.push(AgentListRow::Agent {
                 pane_id: pane_id.clone(),
-                depth: 0,
+                depth: u16::from(state.is_some()),
             });
         }
     }
