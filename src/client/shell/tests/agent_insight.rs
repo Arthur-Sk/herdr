@@ -433,6 +433,41 @@ fn resting_on_an_agent_row_shows_its_card() {
 }
 
 #[test]
+fn a_second_right_click_opens_the_menu_again() {
+    let mut state = state_with(vec![
+        claude(1, AgentStatus::Idle, &[]),
+        claude(2, AgentStatus::Idle, &[]),
+    ]);
+    let menu_of = |state: &ClientShellState| match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Agent { pane_id, .. },
+            ..
+        })) => Some(pane_id.clone()),
+        _ => None,
+    };
+    screen(&mut state);
+    let first = agent_at(&state, "pane_1");
+    let second = agent_at(&state, "pane_2");
+    mouse(&mut state, MouseEventKind::Down(MouseButton::Right), first);
+    assert_eq!(menu_of(&state).as_deref(), Some("pane_1"));
+    // The menu opened at the pointer: the same spot again lands on it.
+    screen(&mut state);
+    mouse(&mut state, MouseEventKind::Up(MouseButton::Right), first);
+    mouse(&mut state, MouseEventKind::Down(MouseButton::Right), first);
+    assert_eq!(menu_of(&state).as_deref(), Some("pane_1"));
+    // Another row, even under the open menu, gets its own.
+    screen(&mut state);
+    mouse(&mut state, MouseEventKind::Down(MouseButton::Right), second);
+    assert_eq!(menu_of(&state).as_deref(), Some("pane_2"));
+    // Once the menu is closed, a right click opens it as before.
+    mouse(&mut state, MouseEventKind::Down(MouseButton::Left), (0, 0));
+    screen(&mut state);
+    assert_eq!(menu_of(&state), None);
+    mouse(&mut state, MouseEventKind::Down(MouseButton::Right), first);
+    assert_eq!(menu_of(&state).as_deref(), Some("pane_1"));
+}
+
+#[test]
 fn the_card_title_skips_the_shell_title_once_the_tab_has_a_name() {
     let mut agent = claude(1, AgentStatus::Idle, &[]);
     agent.title = None;

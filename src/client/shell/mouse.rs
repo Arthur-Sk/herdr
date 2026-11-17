@@ -689,6 +689,16 @@ impl ClientShellState {
         }
     }
 
+    /// A right click while a menu is open closes it and acts as if none were:
+    /// it opens the menu of whatever lies under the pointer, the same row's
+    /// again included. The menu opens at the pointer, so the second click
+    /// mostly lands on the menu itself.
+    fn reopen_menu_under(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
+        self.overlay = None;
+        outcome.repaint = true;
+        self.handle_mouse(mouse, outcome);
+    }
+
     /// Routes mouse input through overlays, shell controls, and pane interactions.
     ///
     /// Hit-test order determines which overlapping control receives the event;
@@ -1531,6 +1541,9 @@ impl ClientShellState {
                         outcome.repaint = true;
                     }
                 }
+                MouseEventKind::Down(MouseButton::Right) => {
+                    self.reopen_menu_under(mouse, outcome);
+                }
                 _ => {}
             }
             return;
@@ -1558,6 +1571,9 @@ impl ClientShellState {
                         self.overlay = None;
                         outcome.repaint = true;
                     }
+                }
+                MouseEventKind::Down(MouseButton::Right) => {
+                    self.reopen_menu_under(mouse, outcome);
                 }
                 _ => {}
             }
