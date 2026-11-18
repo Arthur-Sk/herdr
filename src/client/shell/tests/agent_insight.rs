@@ -433,6 +433,54 @@ fn resting_on_an_agent_row_shows_its_card() {
 }
 
 #[test]
+fn a_claude_row_names_the_login_it_runs_under() {
+    let mut renamed = claude(
+        3,
+        AgentStatus::Idle,
+        &[(insight::LOGIN_TOKEN, "claude-per")],
+    );
+    renamed.display_agent = Some("reviewer".into());
+    let mut state = state_with(vec![
+        claude(1, AgentStatus::Idle, &[(insight::LOGIN_TOKEN, "claude-cc")]),
+        claude(2, AgentStatus::Idle, &[]),
+        renamed,
+    ]);
+    let text = screen(&mut state);
+    let row_text = |pane_id: &str| {
+        let (rect, _) = state
+            .hits
+            .agents
+            .iter()
+            .find(|(_, candidate)| candidate == pane_id)
+            .expect("agent row");
+        text.lines()
+            .skip(usize::from(rect.y))
+            .take(usize::from(rect.height))
+            .map(|line| {
+                line.chars()
+                    .skip(usize::from(rect.x))
+                    .take(usize::from(rect.width))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let cc = row_text("pane_1");
+    assert!(cc.contains("claude-cc"), "{cc}");
+    // Without a login known it stays "claude"; a name given by hand stays too.
+    let plain = row_text("pane_2");
+    assert!(
+        plain.contains("claude") && !plain.contains("claude-"),
+        "{plain}"
+    );
+    let named = row_text("pane_3");
+    assert!(
+        named.contains("reviewer") && !named.contains("claude-per"),
+        "{named}"
+    );
+}
+
+#[test]
 fn a_second_right_click_opens_the_menu_again() {
     let mut state = state_with(vec![
         claude(1, AgentStatus::Idle, &[]),

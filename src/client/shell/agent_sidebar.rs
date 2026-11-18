@@ -654,18 +654,24 @@ pub(super) fn agent_row(
     let tab_label = tab
         .filter(|tab| tab_count > 1 || tab.custom_label)
         .map(|tab| tab.label.as_str());
+    let tokens = agent.tokens.iter().cloned().collect::<HashMap<_, _>>();
     let agent_label = agent
         .display_agent
         .as_deref()
         .or(agent.name.as_deref())
         .or(agent.agent.as_deref())
         .or(agent.title.as_deref());
+    // A Claude agent names the login it runs under ("claude-cc"): plain
+    // "claude" would be the same on every row. A name given by hand stays.
+    let agent_label = match (agent_label, tokens.get(crate::agent_insight::LOGIN_TOKEN)) {
+        (Some("claude"), Some(login)) => Some(login.as_str()),
+        (label, _) => label,
+    };
     let labels = agent
         .state_labels
         .iter()
         .cloned()
         .collect::<HashMap<_, _>>();
-    let tokens = agent.tokens.iter().cloned().collect::<HashMap<_, _>>();
     let state_text = labels
         .get(status_text(agent.agent_status))
         .map(String::as_str)
