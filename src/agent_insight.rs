@@ -316,7 +316,7 @@ fn line_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
 /// Whether a message ends by asking the person: a question mark in its last
 /// paragraph outside quotes, code and links, or, in its last three, a
 /// recommendation between options or words that wait for an answer — unless
-/// they say nothing waits. Checked against a week of real turns (22k turn
+/// they say nothing waits, or ask the person to do a thing themselves. Checked against a week of real turns (22k turn
 /// ends): it caught the message before 743 of 770 one-letter answers ("а",
 /// "1 - б"), and of 60 flagged messages drawn at random about nine in ten
 /// waited on the person; most of the rest were reports that still recalled an
@@ -335,10 +335,13 @@ pub(crate) fn asks_person(text: &str) -> bool {
         )
         .expect("nothing-waits pattern")
     });
-    // "If you want another order, say so": an offer, not a question.
+    // "If you want another order, say so": an offer, not a question. "Your
+    // action is needed: close !1041": a thing to do, not an answer awaited.
     static CONDITIONAL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"(?i)(?:если|когда)[^.!?\n]{0,80}(?:скажи|скажите|напиши)")
-            .expect("conditional pattern")
+        regex::Regex::new(
+            r"(?i)(?:если|когда)[^.!?\n]{0,80}(?:скажи|скажите|напиши)|нужн[оы] (?:от (?:тебя|вас) )?(?:тво\S* |ваш\S* )?действи",
+        )
+        .expect("conditional pattern")
     });
     // A question mark inside these is not the message's own.
     static QUOTED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
@@ -863,6 +866,9 @@ mod tests {
             "С правами ассистента приду к тебе с одним вопросом и рекомендацией, когда будут факты.",
             "Ответ ему не нужен. Я жду своё фоновое наблюдение.",
             "Пример запроса: `GET /api/items?page=2` отдаёт вторую страницу.",
+            "Main снова зелёный.\n\n**Нужно твоё действие:** закрыть **!1041**. Закрывать MR — \
+             твоё решение, поэтому я только оставил в нём заметку.\n\nФлот сейчас работает над \
+             !1042.\n\n!1039 и !1035 ведут другие сессии.",
         ] {
             assert!(!asks_person(report), "{report}");
         }
@@ -873,6 +879,20 @@ mod tests {
         let insight = tail(&[reply("u1", "Какой берём?", 10), prompt("а")]);
         assert_eq!(insight.last_message, None);
         assert_eq!(insight.context_tokens, Some(1020));
+    }
+
+    /// A background task's notice starts a turn too: the reply that ends it
+    /// is judged afresh.
+    #[test]
+    fn a_turn_the_agent_starts_itself_replaces_the_question() {
+        let insight = tail(&[
+            reply("u1", "Какой берём?", 10),
+            prompt("<task-notification><status>completed</status></task-notification>"),
+            reply("u2", "Пайплайн зелёный, влил.", 20),
+        ]);
+        let message = insight.last_message.expect("last message");
+        assert_eq!(message.uuid, "u2");
+        assert!(!message.asks);
     }
 
     #[test]
